@@ -43,3 +43,11 @@ src/routeTree.gen.ts
 .history
 .agent
 .tanstack
+# agent execution logs (按天 JSONL，本地调优数据，不入库)
+/logs/
+
+# local debug artifacts
+.playwright-mcp/
+dev-server.log
+*.log
+

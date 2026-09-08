@@ -83,3 +83,20 @@ export const IconAI: React.FC<IconProps> = ({ size = 24, className, active }) =>
     <rect x="5" y="28" width="8" height="8" rx="2" fill="#FA8C16" transform="rotate(25 9 32)" />
   </svg>
 );
+
+// Materials: Flat Folder (Vivid Amber)
+export const IconMaterials: React.FC<IconProps> = ({ size = 24, className, active }) => (
+  <svg width={size} height={size} viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
+    {/* Folder back - Amber */}
+    <path d="M4 10C4 7.79086 5.79086 6 8 6H15L19 11H32C34.2091 11 36 12.7909 36 15V30C36 32.2091 34.2091 34 32 34H8C5.79086 34 4 32.2091 4 30V10Z" fill="#FAAD14" />
+    {/* Folder front - lighter amber */}
+    <path d="M8 15H32C34.2091 15 35.7 16.8 35.3 19L33.4 28.5C33 30.6 31.2 32 29 32H7C4.8 32 3.2 30.1 3.6 18L8 15Z" fill="#FFC53D" />
+    {/* Document lines - flat white */}
+    <rect x="12" y="21" width="16" height="2.5" rx="1.25" fill="white" fillOpacity="0.9" />
+    <rect x="12" y="26" width="10" height="2.5" rx="1.25" fill="white" fillOpacity="0.7" />
+    {/* Status indicator */}
+    {active && (
+      <circle cx="33" cy="33" r="5" fill="#FF4D4F" stroke="white" strokeWidth="2" />
+    )}
+  </svg>
+);

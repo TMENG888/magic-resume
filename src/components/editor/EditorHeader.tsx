@@ -7,6 +7,7 @@ import {
   Edit2,
   Undo2,
   Redo2,
+  Bot,
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { useRouter } from "@/lib/navigation";
@@ -228,6 +229,24 @@ export function EditorHeader({ isMobile }: EditorHeaderProps) {
             </TooltipProvider>
           </div>
           <GrammarCheckDrawer />
+          {/* PI 智能体开关 */}
+          <TooltipProvider delayDuration={100}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 text-violet-500 hover:bg-violet-500/10 hover:text-violet-600"
+                  onClick={() => {
+                    document.dispatchEvent(new CustomEvent("toggle-agent-panel"));
+                  }}
+                >
+                  <Bot className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">PI 智能体</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
           {errors.length > 0 && (
              <div 
                 className="flex items-center space-x-1 cursor-pointer animate-pulse"

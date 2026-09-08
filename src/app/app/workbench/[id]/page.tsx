@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, memo } from "react";
+import React, { useState, useEffect, useLayoutEffect, memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Eye, Edit2, Menu, PanelLeft, Minimize2 } from "lucide-react";
 import { EditorHeader } from "@/components/editor/EditorHeader";
@@ -8,6 +8,7 @@ import { EditPanel } from "@/components/editor/EditPanel";
 import PreviewPanel from "@/components/preview";
 import PreviewDock from "@/components/preview/PreviewDock";
 import { MobileWorkbench } from "@/components/mobile/MobileWorkbench";
+import AgentPanel, { AgentPanelHandle } from "@/components/editor/AgentPanel";
 import { PanelResizeHandle } from "react-resizable-panels";
 import {
   ResizableHandle,
@@ -166,6 +167,16 @@ export default function Home() {
   const [editPanelCollapsed, setEditPanelCollapsed] = useState(false);
   const [previewPanelCollapsed, setPreviewPanelCollapsed] = useState(false);
   const [panelSizes, setPanelSizes] = useState<number[]>(LAYOUT_CONFIG.DEFAULT);
+  const [agentOpen, setAgentOpen] = useState(false);
+
+  // EditorHeader 的智能体按钮通过自定义事件切换面板
+  useEffect(() => {
+    const toggleAgentPanel = () => setAgentOpen((prev) => !prev);
+    document.addEventListener("toggle-agent-panel", toggleAgentPanel);
+    return () => {
+      document.removeEventListener("toggle-agent-panel", toggleAgentPanel);
+    };
+  }, []);
 
   // Create a ref for the resume content that PreviewDock can access
   // Currently we can't get the inner ref easily across component boundaries
@@ -221,7 +232,7 @@ export default function Home() {
     };
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     let newSizes = [];
 
     // 侧边栏尺寸
@@ -274,8 +285,19 @@ export default function Home() {
         newSizes[lastNonZeroIndex] += 100 - total;
       }
     }
+
+    // PI 智能体面板：与侧边栏/编辑/预览同级的第四个可伸缩面板（无遮挡布局）
+    if (agentOpen) {
+      const AGENT_SIZE = 30;
+      const baseTotal = newSizes.reduce((a, b) => a + b, 0);
+      if (baseTotal > 0) {
+        newSizes = newSizes.map((size) => (size * (100 - AGENT_SIZE)) / baseTotal);
+      }
+      newSizes.push(baseTotal > 0 ? AGENT_SIZE : 100);
+    }
+
     updateLayout([...newSizes]);
-  }, [sidePanelCollapsed, editPanelCollapsed, previewPanelCollapsed]);
+  }, [sidePanelCollapsed, editPanelCollapsed, previewPanelCollapsed, agentOpen]);
 
   return (
     <main
@@ -356,6 +378,21 @@ export default function Home() {
                 />
               </div>
             </ResizablePanel>
+
+            {/* PI 智能体面板 - 与侧边栏/编辑/预览同级的第四个可伸缩面板（无遮挡） */}
+            {agentOpen && (
+              <>
+                <DragHandle />
+                <ResizablePanel
+                  id="agent-panel"
+                  order={4}
+                  defaultSize={panelSizes?.[3] ?? 30}
+                  className="bg-background"
+                >
+                  <AgentPanel onClose={() => setAgentOpen(false)} />
+                </ResizablePanel>
+              </>
+            )}
           </ResizablePanelGroup>
         </div>
 
@@ -368,6 +405,9 @@ export default function Home() {
           togglePreviewPanel={togglePreviewPanel}
           resumeContentRef={resumeContentRef}
         />
+
+        {/* PI 智能体：关闭时的边缘悬浮开关（打开时面板已并入布局，无需悬浮层） */}
+        <AgentPanelHandle open={agentOpen} onToggle={() => setAgentOpen((prev) => !prev)} />
       </div>
 
       {/* 移动端布局 */}

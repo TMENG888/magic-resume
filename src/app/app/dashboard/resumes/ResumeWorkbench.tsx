@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useTranslations, useLocale } from "@/i18n/compat/client";
 import { useRouter } from "@/lib/navigation";
-import { Plus, Settings, AlertCircle } from "lucide-react";
+import { Plus, Settings, AlertCircle, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +20,7 @@ import { useResumeStore } from "@/store/useResumeStore";
 import { useAIConfigStore } from "@/store/useAIConfigStore";
 import { DEFAULT_TEMPLATES } from "@/config";
 import { CreateResumeModal } from "./CreateResumeModal";
+import { AIResumeDialog } from "./AIResumeDialog";
 import { ImportResumeDialog } from "./ImportResumeDialog";
 import { ResumeCardItem } from "./ResumeCardItem";
 import { AnimatedImportButton } from "./AnimatedImportButton";
@@ -53,6 +54,7 @@ export const ResumeWorkbench = () => {
     const router = useRouter();
     const [hasConfiguredFolder, setHasConfiguredFolder] = useState(false);
     const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+    const [isAIResumeOpen, setIsAIResumeOpen] = useState(false);
     const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
     const [isImporting, setIsImporting] = useState(false);
     const jsonFileInputRef = useRef<HTMLInputElement>(null);
@@ -354,6 +356,14 @@ export const ResumeWorkbench = () => {
                         {t("dashboard.resumes.myResume")}
                     </h1>
                     <div className="flex items-center space-x-2">
+                        <Button
+                            variant="outline"
+                            className="border-violet-500/40 text-violet-600 hover:bg-violet-500/10 hover:text-violet-700 dark:text-violet-400"
+                            onClick={() => setIsAIResumeOpen(true)}
+                        >
+                            <Wand2 className="mr-2 h-4 w-4" />
+                            {t("dashboard.resumes.aiDialog.title")}
+                        </Button>
                         <AnimatedImportButton onClick={() => setIsImportDialogOpen(true)} t={t} />
                         <motion.div
                             whileHover={{ scale: 1.05 }}
@@ -438,6 +448,16 @@ export const ResumeWorkbench = () => {
                     open={isCreateModalOpen}
                     onOpenChange={setIsCreateModalOpen}
                     onCreate={handleCreateFromModal}
+                />
+
+                <AIResumeDialog
+                    open={isAIResumeOpen}
+                    onOpenChange={setIsAIResumeOpen}
+                    onGenerated={(result) => {
+                        const resumeId = addResume(createResumeFromAIResult(result, String((result as { title?: string }).title || "AI 定制简历")));
+                        setActiveResume(resumeId);
+                        router.push({ to: "/app/workbench/$id", params: { id: resumeId } });
+                    }}
                 />
 
                 <PdfImportPreview resume={pendingPdfResume} onCancel={() => setPendingPdfResume(null)} onConfirm={confirmPdfImport} />

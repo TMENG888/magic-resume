@@ -151,7 +151,10 @@ const PreviewDock = ({
 
   return (
     <>
-      <div className="hidden md:flex flex-col items-center fixed top-1/2 right-3 transform -translate-y-1/2 z-[50]">
+      <div
+        className="hidden md:flex flex-col items-center fixed top-1/2 transform -translate-y-1/2 z-[50] transition-[right] duration-300"
+        style={{ right: "calc(12px + var(--agent-panel-width, 0px))" }}
+      >
         <TooltipProvider delayDuration={0}>
           <Dock className="bg-background/80 border border-border/40 shadow-xl mb-0">
             <div className="flex flex-col gap-2">
