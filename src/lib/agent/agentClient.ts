@@ -175,7 +175,7 @@ export async function runAgentTurn(options: RunAgentOptions): Promise<void> {
       turns.push({
         role: "user",
         content:
-          `系统提示：你上一轮的输出不符合要求（${parseError}）。请严格只输出一个 JSON 对象：需要调用工具时输出 {"action": {"tool": "工具名", "args": {...}}}；信息足够时输出 {"reply": "最终回复"}。不要输出任何其它文本、注释或代码围栏，确保 JSON 完整闭合。`,
+          `系统提示：你上一轮的输出不符合要求（${parseError}）。请严格只输出一个 JSON 对象：需要调用工具时输出 {"action": {"tool": "工具名", "args": {...}}}；信息足够时输出 {"reply": "最终回复"}。不要输出任何其它文本、注释或代码围栏，确保 JSON 完整闭合。输出一个 JSON 后立即停止：禁止续写 [tool_result] 或 [assistant] 等后续内容，禁止伪造工具结果——工具由系统真实执行，结果由系统回填。`,
       });
       onEvent({ type: "notice", message: `模型输出格式异常，已自动纠正重试（${correctiveRetries}/${MAX_CORRECTIVE_RETRIES}）` });
       return false;

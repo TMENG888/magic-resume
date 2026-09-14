@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -37,6 +37,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { toast } from "sonner";
 import {
+  Check,
   ChevronRight,
   Download,
   FileArchive,
@@ -47,12 +48,15 @@ import {
   Folder,
   FolderPlus,
   Loader2,
+  Minus,
   MoreHorizontal,
   Pencil,
   RefreshCw,
   Trash2,
   Upload,
   FolderUp,
+  X,
+  AlertCircle,
 } from "lucide-react";
 import { useTranslations } from "@/i18n/compat/client";
 import { useMaterialsStore } from "@/store/useMaterialsStore";
@@ -60,6 +64,7 @@ import {
   createMaterialsFolder,
   deleteMaterialsNode,
   downloadMaterialsFile,
+  extractMaterialsFile,
   extensionOf,
   formatBytes,
   isArchiveFile,
@@ -84,6 +89,13 @@ const getNodeType = (node: { name: string; kind: "file" | "dir" }) => {
   if (["doc", "docx", "ppt", "pptx", "xls", "xlsx"].includes(ext)) return "office" as const;
   return "binary" as const;
 };
+
+// Linear 规范：复选框 5px 内圆角（约 rounded-sm 级）、选中态用主色填充，
+// 未选中为 hairline 描边；主色仅用于选中/焦点，不作装饰
+const CHECKBOX_BASE =
+  "flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[5px] border transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40";
+const CHECKBOX_ON = "border-primary bg-primary text-primary-foreground";
+const CHECKBOX_OFF = "border-border bg-background hover:border-primary/60";
 
 const NodeIcon = ({ node, className }: { node: { name: string; kind: "file" | "dir" }; className?: string }) => {
   const type = getNodeType(node);
@@ -117,22 +129,27 @@ export default function MaterialsPage() {
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState<{ name: string; text: string } | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  // 批量选择：仅当前目录内的节点可被选中，切换目录/刷新后自动清理失效路径
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const [lastCheckedIndex, setLastCheckedIndex] = useState<number | null>(null);
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const folderInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
-  useEffect(() => {
-    // webkitdirectory 属性 React 不识别，手动设置
-    const input = folderInputRef.current;
-    if (input) {
-      input.setAttribute("webkitdirectory", "");
-      input.setAttribute("directory", "");
+  // webkitdirectory 属性 React 不识别，需手动设置；用 ref callback 确保
+  // input 实际挂载时属性必然存在（不依赖首次挂载时机）
+  const attachFolderPicker = (el: HTMLInputElement | null) => {
+    folderInputRef.current = el;
+    if (el) {
+      el.setAttribute("webkitdirectory", "");
+      el.setAttribute("directory", "");
     }
-  }, []);
+  };
 
   const currentNodes = useMemo(() => {
     if (!currentPath) return tree;
@@ -148,16 +165,135 @@ export default function MaterialsPage() {
 
   const breadcrumbs = useMemo(() => currentPath ? currentPath.split("/") : [], [currentPath]);
 
+  // —— 批量选择（Linear 范式：悬停显现复选框 → 浮动批量操作栏）——
+  const selectionMode = selectedPaths.size > 0;
+  const selectedHere = currentNodes.filter((node) => selectedPaths.has(node.path)).length;
+  const allChecked = currentNodes.length > 0 && selectedHere === currentNodes.length;
+  const someChecked = selectedHere > 0 && !allChecked;
+
+  useEffect(() => {
+    // 目录切换 / 列表刷新后，丢弃已不在当前目录的选择项
+    setSelectedPaths((prev) => {
+      if (prev.size === 0) return prev;
+      const valid = new Set(currentNodes.map((node) => node.path));
+      const next = new Set(Array.from(prev).filter((path) => valid.has(path)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [currentNodes]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !batchDeleteOpen) {
+        setSelectedPaths(new Set());
+        setLastCheckedIndex(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [batchDeleteOpen]);
+
+  const toggleNode = (node: MaterialNode, index: number, shift: boolean) => {
+    setSelectedPaths((prev) => {
+      const next = new Set(prev);
+      if (shift && lastCheckedIndex !== null) {
+        const from = Math.min(lastCheckedIndex, index);
+        const to = Math.max(lastCheckedIndex, index);
+        const range = currentNodes.slice(from, to + 1);
+        // 以点击行为准：原本未选中则范围全选，否则范围取消
+        const turningOn = !next.has(node.path);
+        for (const item of range) {
+          if (turningOn) next.add(item.path);
+          else next.delete(item.path);
+        }
+      } else if (next.has(node.path)) {
+        next.delete(node.path);
+      } else {
+        next.add(node.path);
+      }
+      return next;
+    });
+    setLastCheckedIndex(index);
+  };
+
+  const toggleAll = () => {
+    setSelectedPaths((prev) => {
+      if (allChecked) {
+        const next = new Set(prev);
+        for (const node of currentNodes) next.delete(node.path);
+        return next;
+      }
+      return new Set(Array.from(prev).concat(currentNodes.map((node) => node.path)));
+    });
+  };
+
+  const clearSelection = () => {
+    setSelectedPaths(new Set());
+    setLastCheckedIndex(null);
+  };
+
+  const handleBatchDownload = async () => {
+    const targets = currentNodes.filter(
+      (node) => selectedPaths.has(node.path) && node.kind === "file"
+    );
+    if (!targets.length) return;
+    for (let index = 0; index < targets.length; index += 1) {
+      const node = targets[index];
+      try {
+        await downloadMaterialsFile(node.path);
+      } catch {
+        // 单个失败不阻断其余下载
+      }
+      // 间隔触发，避免浏览器拦截连续多文件下载
+      if (index < targets.length - 1) await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    toast.success(t("batchDownloadStarted", { count: targets.length }));
+  };
+
+  const handleBatchDelete = async () => {
+    const targets = currentNodes.filter((node) => selectedPaths.has(node.path));
+    if (!targets.length) return;
+    setBusy(true);
+    try {
+      const results = await Promise.allSettled(
+        targets.map((node) => deleteMaterialsNode(node.path))
+      );
+      const ok = results.filter((result) => result.status === "fulfilled").length;
+      const failed = results.length - ok;
+      if (failed === 0) toast.success(t("batchDeleted", { count: ok }));
+      else toast.warning(t("batchDeletePartial", { ok, failed }));
+      setBatchDeleteOpen(false);
+      clearSelection();
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleUpload = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     setBusy(true);
     try {
-      const saved = await saveFilesToMaterials(Array.from(files), currentPath);
-      toast.success(t("uploaded", { count: saved.length }));
+      const { saved, failed } = await saveFilesToMaterials(Array.from(files), currentPath);
+      if (saved.length) toast.success(t("uploaded", { count: saved.length }));
+      if (failed.length) {
+        // 具体原因直接展示（配额/同名冲突/占用…），不再吞成笼统的“上传失败”
+        console.error("[materials] upload failures:", failed);
+        toast.error(
+          t("uploadPartial", {
+            count: saved.length,
+            failed: failed.length,
+            reason: failed[0].reason,
+          })
+        );
+      }
       await refresh();
     } catch (error) {
-      console.error(error);
-      toast.error(t("uploadFailed"));
+      console.error("[materials] upload error:", error);
+      toast.error(
+        error instanceof Error
+          ? `${t("uploadFailed")}：${error.message}`
+          : t("uploadFailed")
+      );
     } finally {
       setBusy(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -204,6 +340,12 @@ export default function MaterialsPage() {
       await deleteMaterialsNode(deleteTarget.path);
       toast.success(t("deleted"));
       setDeleteTarget(null);
+      setSelectedPaths((prev) => {
+        if (!prev.has(deleteTarget.path)) return prev;
+        const next = new Set(prev);
+        next.delete(deleteTarget.path);
+        return next;
+      });
       await refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t("operationFailed"));
@@ -225,20 +367,40 @@ export default function MaterialsPage() {
         return;
       }
     }
-    if (type !== "text" && type !== "pdf") {
-      toast.info(t("previewTextOnly"));
-      return;
-    }
-    setPreviewLoading(true);
-    try {
-      if (type === "pdf") {
+    if (type === "pdf") {
+      setPreviewLoading(true);
+      try {
         const blob = await readMaterialsFileBlob(node.path);
         const url = URL.createObjectURL(blob);
         setPreview({ name: node.name, text: `__PDF__${url}` });
-        return;
+      } catch {
+        toast.error(t("operationFailed"));
+      } finally {
+        setPreviewLoading(false);
       }
-      const text = await readMaterialsFileText(node.path, 20_000);
-      setPreview({ name: node.name, text });
+      return;
+    }
+    if (type === "text") {
+      setPreviewLoading(true);
+      try {
+        const text = await readMaterialsFileText(node.path, 20_000);
+        setPreview({ name: node.name, text });
+      } catch {
+        toast.error(t("operationFailed"));
+      } finally {
+        setPreviewLoading(false);
+      }
+      return;
+    }
+    // office（docx/pptx/xlsx/odt）、压缩包（zip/tar.gz）等：走通用提取
+    setPreviewLoading(true);
+    try {
+      const extracted = await extractMaterialsFile(node.path);
+      if (extracted.content) {
+        setPreview({ name: node.name, text: extracted.content });
+      } else {
+        toast.info(extracted.note ?? t("previewTextOnly"));
+      }
     } catch {
       toast.error(t("operationFailed"));
     } finally {
@@ -282,7 +444,7 @@ export default function MaterialsPage() {
               onChange={(e) => void handleUpload(e.target.files)}
             />
             <input
-              ref={folderInputRef}
+              ref={attachFolderPicker}
               type="file"
               multiple
               className="hidden"
@@ -331,6 +493,17 @@ export default function MaterialsPage() {
         </div>
       </header>
 
+      {/* OPFS 按 origin 隔离：localhost 与 127.0.0.1 互不可见，务必用同一地址访问 */}
+      {supported && /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname) && (
+        <div className="mb-4 flex items-start gap-2.5 rounded-2xl border border-amber-500/30 bg-amber-500/8 px-4 py-3 text-[13px] leading-relaxed text-amber-700 dark:text-amber-400">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            资料库存储在浏览器 OPFS 中，<b>按访问地址（origin）隔离</b>：使用 <code className="rounded bg-amber-500/10 px-1">localhost:3000</code> 与 <code className="rounded bg-amber-500/10 px-1">127.0.0.1:3000</code> 看到的是两套独立的资料库。
+            当前地址为 <b>{window.location.origin}</b> —— 若之前用另一个地址上传过资料，请改回那个地址访问即可看到。
+          </div>
+        </div>
+      )}
+
       {!supported ? (
         <div className="rounded-2xl border border-destructive/30 bg-destructive/5 p-8 text-center text-sm text-destructive">
           {t("unsupported")}
@@ -338,7 +511,26 @@ export default function MaterialsPage() {
       ) : (
         <section className="overflow-hidden rounded-2xl border border-border/80 bg-card/40 shadow-[0_4px_24px_rgba(0,0,0,0.03)] backdrop-blur-md transition-all">
           {/* Breadcrumb bar */}
-          <div className="flex items-center justify-between border-b border-border/60 px-4 py-2.5">
+          <div className="flex items-center justify-between gap-3 border-b border-border/60 px-4 py-2.5">
+            <div className="flex min-w-0 items-center gap-3">
+              {/* 全选：三态（全选 / 半选 / 空），与行内复选框水平对齐 */}
+              <button
+                type="button"
+                role="checkbox"
+                aria-checked={allChecked ? true : someChecked ? "mixed" : false}
+                aria-label={t("selectAll")}
+                title={t("selectAll")}
+                disabled={!currentNodes.length}
+                className={cn(
+                  CHECKBOX_BASE,
+                  allChecked || someChecked ? CHECKBOX_ON : CHECKBOX_OFF,
+                  !currentNodes.length && "opacity-40",
+                )}
+                onClick={toggleAll}
+              >
+                {allChecked ? <Check className="h-3 w-3" strokeWidth={3} /> : null}
+                {someChecked ? <Minus className="h-3 w-3" strokeWidth={3} /> : null}
+              </button>
             <Breadcrumb>
               <BreadcrumbList>
                 <BreadcrumbItem>
@@ -374,6 +566,7 @@ export default function MaterialsPage() {
                 })}
               </BreadcrumbList>
             </Breadcrumb>
+            </div>
             <span className="text-xs text-muted-foreground">
               {currentNodes.length} {t("items")}
             </span>
@@ -415,7 +608,9 @@ export default function MaterialsPage() {
                       <span>..</span>
                     </button>
                   )}
-                  {currentNodes.map((node, index) => (
+                  {currentNodes.map((node, index) => {
+                    const isSelected = selectedPaths.has(node.path);
+                    return (
                     <motion.div
                       key={node.path}
                       initial={{ opacity: 0, y: 4 }}
@@ -423,9 +618,29 @@ export default function MaterialsPage() {
                       transition={{ duration: 0.18, delay: Math.min(index * 0.02, 0.3) }}
                       className={cn(
                         "group flex items-center gap-3 rounded-xl px-3 py-2.5 transition-colors",
-                        "hover:bg-muted/60",
+                        isSelected ? "bg-primary/[0.07] hover:bg-primary/[0.11]" : "hover:bg-muted/60",
                       )}
                     >
+                      <button
+                        type="button"
+                        role="checkbox"
+                        aria-checked={isSelected}
+                        aria-label={node.name}
+                        className={cn(
+                          CHECKBOX_BASE,
+                          isSelected ? CHECKBOX_ON : CHECKBOX_OFF,
+                          // 悬停显现；已选或批量模式下常显（触屏无 hover，同样常显）
+                          isSelected || selectionMode
+                            ? "opacity-100"
+                            : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-sm:opacity-100",
+                        )}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleNode(node, index, e.shiftKey);
+                        }}
+                      >
+                        {isSelected ? <Check className="h-3 w-3" strokeWidth={3} /> : null}
+                      </button>
                       <button
                         type="button"
                         className="flex min-w-0 flex-1 items-center gap-3 text-left"
@@ -501,7 +716,8 @@ export default function MaterialsPage() {
                         </DropdownMenuContent>
                       </DropdownMenu>
                     </motion.div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
               {loading && !loaded && (
@@ -513,6 +729,55 @@ export default function MaterialsPage() {
           </ScrollArea>
         </section>
       )}
+
+      {/* 浮动批量操作栏（Linear 范式：选中后底部居中浮现，表面提升 + 发丝边框） */}
+      <AnimatePresence>
+        {selectionMode && (
+          <motion.div
+            initial={{ opacity: 0, y: 16, x: "-50%" }}
+            animate={{ opacity: 1, y: 0, x: "-50%" }}
+            exit={{ opacity: 0, y: 16, x: "-50%" }}
+            transition={{ duration: 0.18, ease: "easeOut" }}
+            className="fixed bottom-6 left-1/2 z-40"
+          >
+            <div className="flex items-center gap-1 rounded-xl border border-border/80 bg-card/95 py-1.5 pl-4 pr-1.5 shadow-[0_8px_32px_rgba(0,0,0,0.14)] backdrop-blur-md">
+              <span className="whitespace-nowrap text-[13px] font-medium text-foreground">
+                {t("selectedCount", { count: selectedPaths.size })}
+              </span>
+              <span className="mx-1.5 h-4 w-px bg-border" />
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 gap-1.5 rounded-lg text-muted-foreground hover:text-foreground"
+                onClick={clearSelection}
+              >
+                <X className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">{t("clearSelection")}</span>
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 gap-1.5 rounded-lg"
+                onClick={() => void handleBatchDownload()}
+                disabled={busy}
+              >
+                <Download className="h-3.5 w-3.5" />
+                {t("batchDownload")}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 gap-1.5 rounded-lg border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                onClick={() => setBatchDeleteOpen(true)}
+                disabled={busy}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                {t("batchDelete")}
+              </Button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Rename dialog */}
       <Dialog open={!!renameTarget} onOpenChange={(open) => !open && setRenameTarget(null)}>
@@ -587,6 +852,31 @@ export default function MaterialsPage() {
               onClick={(e) => {
                 e.preventDefault();
                 void handleDelete();
+              }}
+            >
+              {busy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+              {t("delete")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Batch delete confirm */}
+      <AlertDialog open={batchDeleteOpen} onOpenChange={setBatchDeleteOpen}>
+        <AlertDialogContent className="rounded-2xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("batchDeleteConfirmTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("batchDeleteConfirmDescription", { count: selectedPaths.size })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(e) => {
+                e.preventDefault();
+                void handleBatchDelete();
               }}
             >
               {busy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}

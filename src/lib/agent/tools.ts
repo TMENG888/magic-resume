@@ -67,7 +67,8 @@ export const AGENT_TOOLS: AgentToolDef[] = [
   },
   {
     name: "read_material",
-    description: "按相对路径读取「我的资料」中的文件内容（文本 / PDF 自动提取），或整个文件夹的摘要内容。",
+    description:
+      "按相对路径读取「我的资料」中的文件或文件夹。支持：文本/代码/配置类、PDF（自动提取文字）、docx/pptx/xlsx/odt（自动提取正文）、zip 压缩包（列出内部清单并提取其中的文本文件）、gz。传入文件夹路径则递归读取其中所有文件（自动跳过无法提取的）。",
     parameters: { path: "「我的资料」中的相对路径，如 个人材料/简历.pdf 或 项目集/" },
   },
 ];
@@ -80,6 +81,23 @@ const htmlToList = (items: unknown) => {
   const list = toStringArray(items);
   if (!list.length) return "";
   return `<ul>${list.map((item) => `<li>${item}</li>`).join("")}</ul>`;
+};
+
+/** 将简历中 HTML 正文（<ul><li>…）转回纯文本行数组（get_resume 返回全量正文用） */
+const htmlToItems = (html: unknown): string[] => {
+  const text = typeof html === "string" ? html.trim() : "";
+  if (!text) return [];
+  try {
+    const doc = new DOMParser().parseFromString(text, "text/html");
+    const items = Array.from(doc.querySelectorAll("li"))
+      .map((li) => (li.textContent ?? "").trim())
+      .filter(Boolean);
+    if (items.length) return items;
+    const plain = (doc.body.textContent ?? "").trim();
+    return plain ? plain.split(/\n+/).map((s) => s.trim()).filter(Boolean) : [];
+  } catch {
+    return text.replace(/<[^>]+>/g, "\n").split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  }
 };
 
 const resumeToSummary = (resume: ResumeData) => ({
@@ -96,13 +114,19 @@ const resumeToSummary = (resume: ResumeData) => ({
   education: resume.education.map((item) => ({
     school: item.school, major: item.major, degree: item.degree,
     startDate: item.startDate, endDate: item.endDate, gpa: item.gpa,
+    description: htmlToItems(item.description),
     visible: item.visible,
   })),
   experience: resume.experience.map((item) => ({
-    company: item.company, position: item.position, date: item.date, visible: item.visible,
+    company: item.company, position: item.position, date: item.date,
+    details: htmlToItems(item.details),
+    visible: item.visible,
   })),
   projects: resume.projects.map((item) => ({
-    name: item.name, role: item.role, date: item.date, visible: item.visible,
+    name: item.name, role: item.role, date: item.date,
+    description: htmlToItems(item.description),
+    link: item.link ?? "", linkLabel: item.linkLabel ?? "",
+    visible: item.visible,
   })),
   skillContent: resume.skillContent,
   selfEvaluationContent: resume.selfEvaluationContent,
@@ -170,7 +194,7 @@ export function buildResumePatch(patchRaw: Record<string, unknown>): string {
       position: plainText(item.position),
       date: plainText(item.date),
       details: htmlToList(item.details ?? item.description),
-      visible: true,
+      visible: item.visible !== false,
     }));
     store.updateResume(resumeId, { experience });
     applied.push(`experience 替换为 ${experience.length} 条`);
@@ -186,7 +210,7 @@ export function buildResumePatch(patchRaw: Record<string, unknown>): string {
       description: htmlToList(item.description ?? item.details),
       link: plainText(item.link),
       linkLabel: plainText(item.linkLabel),
-      visible: true,
+      visible: item.visible !== false,
     }));
     store.updateResume(resumeId, { projects });
     applied.push(`projects 替换为 ${projects.length} 条`);

@@ -241,27 +241,83 @@ export async function createMaterialsFolder(dirPath: string, name: string): Prom
 }
 
 /** 保存一批文件到指定目录；保留 File.webkitRelativePath 中的目录结构 */
-export async function saveFilesToMaterials(files: File[], dirPath: string): Promise<string[]> {
-  const saved: string[] = [];
-  for (const file of files) {
-    const relative = (file as File & { webkitRelativePath?: string }).webkitRelativePath || "";
-    const segments = relative ? relative.split("/") : [file.name];
-    // 去掉 webkitRelativePath 的第一段顶层根目录名，保持用户所选目录直接映射
-    const innerSegments = segments.length > 1 && segments[0] === (file as File & { webkitRelativePath?: string }).webkitRelativePath?.split("/")[0]
-      ? segments.slice(1)
-      : segments;
-    const finalSegments = innerSegments.length ? innerSegments : [file.name];
-    const fileName = finalSegments[finalSegments.length - 1];
-    const targetDir = joinPath(dirPath, ...finalSegments.slice(0, -1));
+/**
+ * 由 webkitRelativePath（或回退文件名）解析保存目标：
+ * 返回目标子目录路径段与文件名。完整保留目录结构（含顶层文件夹名），
+ * 上传文件夹后在资料库中以同名文件夹呈现，而不是拆散成子文件。
+ */
+export function resolveSaveTarget(
+  relative: string,
+  fallbackName: string
+): { dirSegments: string[]; fileName: string } {
+  const segments = relative ? relative.split("/") : [fallbackName];
+  const fileName = segments[segments.length - 1] || fallbackName;
+  return { dirSegments: segments.slice(0, -1), fileName };
+}
 
-    const dir = await getDirHandleByPath(targetDir, true);
+const describeWriteError = (error: unknown): string => {
+  const name = error instanceof Error ? error.name : "";
+  if (name === "NoModificationAllowedError") return "文件被占用，请稍后重试";
+  if (name === "QuotaExceededError") return "浏览器存储空间不足";
+  if (name === "TypeMismatchError") return "存在同名但类型不同的文件/文件夹";
+  if (name === "NotFoundError") return "上级目录不存在";
+  return error instanceof Error ? error.message : String(error);
+};
+
+export interface SaveFilesResult {
+  saved: string[];
+  failed: { file: string; reason: string }[];
+}
+
+/** 保存一批文件到指定目录；保留 File.webkitRelativePath 的完整目录结构（含所选文件夹名）。
+ *
+ * 单个文件失败不中断整批（结果中返回 failed 明细）；
+ * 文件锁冲突自动重试一次；父目录句柄按路径缓存，大批量上传不再逐文件重建句柄。
+ */
+export async function saveFilesToMaterials(files: File[], dirPath: string): Promise<SaveFilesResult> {
+  const saved: string[] = [];
+  const failed: SaveFilesResult["failed"] = [];
+  const dirHandleCache = new Map<string, FileSystemDirectoryHandle>();
+
+  const getDirCached = async (path: string): Promise<FileSystemDirectoryHandle> => {
+    const cached = dirHandleCache.get(path);
+    if (cached) return cached;
+    const dir = await getDirHandleByPath(path, true);
+    dirHandleCache.set(path, dir);
+    return dir;
+  };
+
+  const writeFile = async (dir: FileSystemDirectoryHandle, fileName: string, file: File) => {
     const handle = await dir.getFileHandle(fileName, { create: true });
     const writable = await handle.createWritable();
     await writable.write(file);
     await writable.close();
-    saved.push(joinPath(targetDir, fileName));
+  };
+
+  for (const file of files) {
+    const relative = (file as File & { webkitRelativePath?: string }).webkitRelativePath || "";
+    const { dirSegments, fileName } = resolveSaveTarget(relative, file.name);
+    const targetDir = joinPath(dirPath, ...dirSegments);
+    const fullPath = joinPath(targetDir, fileName);
+    try {
+      const dir = await getDirCached(targetDir);
+      try {
+        await writeFile(dir, fileName, file);
+      } catch (error) {
+        // 文件被占用（同名文件尚有未关闭的写入流）：延迟后重试一次
+        if (error instanceof Error && error.name === "NoModificationAllowedError") {
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          await writeFile(dir, fileName, file);
+        } else {
+          throw error;
+        }
+      }
+      saved.push(fullPath);
+    } catch (error) {
+      failed.push({ file: fullPath, reason: describeWriteError(error) });
+    }
   }
-  return saved;
+  return { saved, failed };
 }
 
 export async function renameMaterialsNode(path: string, newName: string): Promise<string> {
@@ -390,6 +446,239 @@ export async function extractPdfText(file: Blob, maxPages = MATERIAL_PDF_MAX_PAG
   };
 }
 
+/* ------------------------------------------------------------------ */
+/* 压缩包与 Office 文档解析（零依赖：手写 ZIP 目录解析 + 原生解压流）     */
+/* ------------------------------------------------------------------ */
+
+interface ZipEntry {
+  name: string;
+  size: number;
+  read: () => Promise<Uint8Array>;
+}
+
+/** 原生 deflate-raw 解压（Chrome 103+） */
+async function inflateRaw(data: Uint8Array): Promise<Uint8Array> {
+  const DS = (globalThis as { DecompressionStream?: new (format: string) => TransformStream<Uint8Array, Uint8Array> }).DecompressionStream;
+  if (!DS) throw new Error("当前浏览器不支持 DecompressionStream");
+  const stream = new Blob([data as BlobPart]).stream().pipeThrough(new DS("deflate-raw"));
+  const buf = await new Response(stream).arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+/** gzip 解压 */
+async function gunzip(data: Uint8Array): Promise<Uint8Array> {
+  const DS = (globalThis as { DecompressionStream?: new (format: string) => TransformStream<Uint8Array, Uint8Array> }).DecompressionStream;
+  if (!DS) throw new Error("当前浏览器不支持 DecompressionStream");
+  const stream = new Blob([data as BlobPart]).stream().pipeThrough(new DS("gzip"));
+  const buf = await new Response(stream).arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+/** 解析 ZIP central directory，返回全部条目（零依赖，支持 stored/deflate） */
+async function parseZipEntries(blob: Blob): Promise<ZipEntry[]> {
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  // 从尾部向前搜索 EOCD 签名（PK\x05\x06）
+  let eocd = -1;
+  const scanFrom = Math.max(0, buf.length - 66_000);
+  for (let i = buf.length - 22; i >= scanFrom; i -= 1) {
+    if (dv.getUint32(i, true) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) throw new Error("ZIP 目录未找到（可能为分卷或加密包）");
+  const entryCount = dv.getUint16(eocd + 10, true);
+  let offset = dv.getUint32(eocd + 16, true);
+
+  const entries: ZipEntry[] = [];
+  const decoderFor = (flag: number) => {
+    if (flag & 0x800) return new TextDecoder("utf-8");
+    try {
+      return new TextDecoder("gbk"); // 中文 Windows 压缩包常见非 UTF-8 文件名
+    } catch {
+      return new TextDecoder("utf-8");
+    }
+  };
+
+  for (let i = 0; i < entryCount; i += 1) {
+    if (dv.getUint32(offset, true) !== 0x02014b50) break; // PK\x01\x02
+    const flag = dv.getUint16(offset + 8, true);
+    const method = dv.getUint16(offset + 10, true);
+    const compressedSize = dv.getUint32(offset + 20, true);
+    const uncompressedSize = dv.getUint32(offset + 24, true);
+    const nameLen = dv.getUint16(offset + 28, true);
+    const extraLen = dv.getUint16(offset + 30, true);
+    const commentLen = dv.getUint16(offset + 32, true);
+    const localOffset = dv.getUint32(offset + 42, true);
+    const name = decoderFor(flag).decode(buf.subarray(offset + 46, offset + 46 + nameLen));
+
+    // local file header（PK\x03\x04）：数据区 = local + 30 + fnLen + extraLen
+    const localFnLen = dv.getUint16(localOffset + 26, true);
+    const localExtraLen = dv.getUint16(localOffset + 28, true);
+    const dataStart = localOffset + 30 + localFnLen + localExtraLen;
+    const raw = buf.subarray(dataStart, dataStart + compressedSize);
+
+    entries.push({
+      name,
+      size: uncompressedSize,
+      read: async () => (method === 0 ? new Uint8Array(raw) : await inflateRaw(raw)),
+    });
+    offset += 46 + nameLen + extraLen + commentLen;
+  }
+  return entries;
+}
+
+/** 从 XML 文本中按标签提取文本（命名空间前缀无关） */
+function extractXmlTexts(xml: string, localNames: string[]): string[] {
+  const out: string[] = [];
+  try {
+    const doc = new DOMParser().parseFromString(xml, "text/xml");
+    for (const local of localNames) {
+      for (const el of Array.from(doc.getElementsByTagName("*"))) {
+        if (el.localName === local && el.textContent?.trim()) out.push(el.textContent.trim());
+      }
+    }
+  } catch {
+    for (const local of localNames) {
+      const re = new RegExp(`<[^>]*:?${local}[\\s>][^]*?</[^>]*:?${local}>`, "g");
+      for (const m of Array.from(xml.matchAll(re))) out.push(m[0].replace(/<[^>]+>/g, "").trim());
+    }
+  }
+  return out.filter(Boolean);
+}
+
+const bytesToText = (bytes: Uint8Array) => new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+
+/** docx：word/document.xml 按 <w:p> 段落提取 */
+async function extractDocx(blob: Blob): Promise<{ content?: string; note?: string }> {
+  const entries = await parseZipEntries(blob);
+  const doc = entries.find((e) => e.name === "word/document.xml");
+  if (!doc) return { note: "docx 中未找到 word/document.xml（可能损坏）" };
+  const xml = bytesToText(await doc.read());
+  // 按段落 <w:p> 分组，段内拼接 <w:t>
+  const paragraphs = xml.split(/<w:p[\s>]/).slice(1).map((seg) => {
+    const texts = Array.from(seg.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)).map((m) => m[1]);
+    return texts.join("").trim();
+  }).filter(Boolean);
+  const text = paragraphs.join("\n");
+  if (!text.trim()) return { note: "docx 中未提取到文本内容" };
+  return { content: text.length > MATERIAL_FILE_CHAR_LIMIT ? `${text.slice(0, MATERIAL_FILE_CHAR_LIMIT)}…` : text, ...(text.length > MATERIAL_FILE_CHAR_LIMIT ? { truncated: true } : {}) };
+}
+
+/** pptx：ppt/slides/slideN.xml 按 slide 顺序提取 */
+async function extractPptx(blob: Blob): Promise<{ content?: string; note?: string }> {
+  const entries = await parseZipEntries(blob);
+  const slides = entries
+    .filter((e) => /^ppt\/slides\/slide\d+\.xml$/.test(e.name))
+    .sort((a, b) => (parseInt(a.name.replace(/\D+/g, ""), 10) || 0) - (parseInt(b.name.replace(/\D+/g, ""), 10) || 0));
+  if (!slides.length) return { note: "pptx 中未找到幻灯片内容" };
+  const chunks: string[] = [];
+  let chars = 0;
+  for (const slide of slides) {
+    const xml = bytesToText(await slide.read());
+    const texts = extractXmlTexts(xml, ["t"]);
+    if (!texts.length) continue;
+    const joined = texts.join(" ");
+    chunks.push(`【${slide.name.split("/").pop()}】${joined}`);
+    chars += joined.length;
+    if (chars > MATERIAL_FILE_CHAR_LIMIT) break;
+  }
+  const text = chunks.join("\n");
+  if (!text.trim()) return { note: "pptx 中未提取到文本内容" };
+  return { content: text.length > MATERIAL_FILE_CHAR_LIMIT ? `${text.slice(0, MATERIAL_FILE_CHAR_LIMIT)}…` : text, ...(chars > MATERIAL_FILE_CHAR_LIMIT ? { truncated: true } : {}) };
+}
+
+/** xlsx：共享字符串池粗提取 */
+async function extractXlsx(blob: Blob): Promise<{ content?: string; note?: string }> {
+  const entries = await parseZipEntries(blob);
+  const shared = entries.find((e) => e.name === "xl/sharedStrings.xml");
+  if (!shared) return { note: "xlsx 中未找到共享字符串表" };
+  const xml = bytesToText(await shared.read());
+  const texts = extractXmlTexts(xml, ["t"]);
+  if (!texts.length) return { note: "xlsx 中未提取到文本内容" };
+  const text = texts.join("\n");
+  return { content: text.length > MATERIAL_FILE_CHAR_LIMIT ? `${text.slice(0, MATERIAL_FILE_CHAR_LIMIT)}…` : text, ...(text.length > MATERIAL_FILE_CHAR_LIMIT ? { truncated: true } : {}) };
+}
+
+/** odt/odp：content.xml 正文 */
+async function extractOdf(blob: Blob): Promise<{ content?: string; note?: string }> {
+  const entries = await parseZipEntries(blob);
+  const content = entries.find((e) => e.name === "content.xml");
+  if (!content) return { note: "ODF 文档中未找到 content.xml" };
+  const xml = bytesToText(await content.read());
+  const texts = extractXmlTexts(xml, ["p", "h"]);
+  const text = texts.join("\n");
+  if (!text.trim()) return { note: "ODF 文档中未提取到文本内容" };
+  return { content: text.length > MATERIAL_FILE_CHAR_LIMIT ? `${text.slice(0, MATERIAL_FILE_CHAR_LIMIT)}…` : text, ...(text.length > MATERIAL_FILE_CHAR_LIMIT ? { truncated: true } : {}) };
+}
+
+/** zip：列出内部清单，并对文本类小文件递归提取（预算内） */
+async function extractZipArchive(blob: Blob, name: string): Promise<{ content?: string; note?: string }> {
+  let entries: ZipEntry[];
+  try {
+    entries = await parseZipEntries(blob);
+  } catch {
+    return { note: "压缩包解析失败（仅支持标准 zip，rar/7z 请先解压后上传）" };
+  }
+  if (!entries.length) return { note: "压缩包为空" };
+  const lines: string[] = [`压缩包 ${name} 内含 ${entries.length} 个文件：`];
+  let chars = lines[0].length;
+  const textRe = /\.(txt|md|markdown|json|csv|log|xml|html|yml|yaml|py|ts|js|sql|ini|conf)$/i;
+  for (const entry of entries) {
+    if (entry.name.endsWith("/")) continue;
+    const line = `- ${entry.name}（${entry.size} 字节）`;
+    lines.push(line);
+    chars += line.length;
+  }
+  // 预算内提取文本类成员
+  const members = entries.filter((e) => textRe.test(e.name) && e.size <= 200_000).slice(0, 20);
+  for (const member of members) {
+    if (chars >= MATERIAL_CONTEXT_CHAR_LIMIT / 2) break;
+    try {
+      const text = bytesToText(await member.read());
+      const clipped = text.slice(0, 12_000);
+      const block = `\n【压缩包内文件 ${member.name}】\n${clipped}${text.length > clipped.length ? "…" : ""}`;
+      lines.push(block);
+      chars += block.length;
+    } catch {
+      /* 跳过无法解压的成员 */
+    }
+  }
+  const content = lines.join("\n");
+  return { content: content.length > MATERIAL_FILE_CHAR_LIMIT * 2 ? `${content.slice(0, MATERIAL_FILE_CHAR_LIMIT * 2)}…` : content, ...(content.length > MATERIAL_FILE_CHAR_LIMIT * 2 ? { truncated: true } : {}) };
+}
+
+/** tar/gz：解压 + 512 字节头解析 */
+async function extractTarGz(blob: Blob, name: string): Promise<{ content?: string; note?: string }> {
+  try {
+    let inner: Uint8Array;
+    if (/\.tgz$|\.tar\.gz$/i.test(name)) {
+      inner = await gunzip(new Uint8Array(await blob.arrayBuffer()));
+      // tar 头解析
+      const lines: string[] = [`tar 包 ${name} 内含文件：`];
+      let pos = 0;
+      const dv = new DataView(inner.buffer, inner.byteOffset, inner.byteLength);
+      while (pos + 512 <= inner.length) {
+        const sizeField = bytesToText(inner.subarray(pos + 124, pos + 136)).replace(/\0.*$/, "").trim();
+        const size = parseInt(sizeField, 8) || 0;
+        const fname = bytesToText(inner.subarray(pos, pos + 100)).replace(/\0.*$/, "").trim();
+        if (!fname) break;
+        lines.push(`- ${fname}（${size} 字节）`);
+        pos += 512 + Math.ceil(size / 512) * 512;
+        if (lines.length > 100) break;
+      }
+      return { content: lines.join("\n") };
+    }
+    // 单文件 gz
+    inner = await gunzip(new Uint8Array(await blob.arrayBuffer()));
+    const innerName = name.replace(/\.gz$/i, "");
+    return await extractMaterialContent({ name: innerName, size: inner.length, blob: new Blob([inner as BlobPart]) });
+  } catch {
+    return { note: "gz/tar.gz 解压失败" };
+  }
+}
+
 /** 按文件类型智能提取内容 */
 export async function extractMaterialContent(entry: {
   name: string;
@@ -414,13 +703,55 @@ export async function extractMaterialContent(entry: {
     }
   }
   if (isImageFile(entry.name)) {
-    return { note: `图片文件（${(entry.blob.type || ext).toUpperCase()}），AI 可结合文件名理解其用途；如需图片内容请人工补充文字描述` };
+    let dimension = "";
+    try {
+      const bitmap = await createImageBitmap(entry.blob);
+      dimension = `，尺寸 ${bitmap.width}×${bitmap.height}`;
+      bitmap.close();
+    } catch {
+      /* SVG 等无法解码时忽略 */
+    }
+    return { note: `图片文件（${(entry.blob.type || ext).toUpperCase()}${dimension}），AI 可结合文件名理解其用途；如需图片内容请人工补充文字描述` };
   }
-  if (isArchiveFile(entry.name)) {
-    return { note: "压缩包文件，无法直接读取内部内容" };
+  if (ext === "docx") {
+    try {
+      return await extractDocx(entry.blob);
+    } catch {
+      return { note: "docx 解析失败" };
+    }
   }
-  if (["doc", "docx", "ppt", "pptx", "xls", "xlsx"].includes(ext)) {
-    return { note: `Office 文档（.${ext}），暂不支持自动提取正文，建议同时提供 PDF / 文本版本` };
+  if (ext === "pptx") {
+    try {
+      return await extractPptx(entry.blob);
+    } catch {
+      return { note: "pptx 解析失败" };
+    }
+  }
+  if (ext === "xlsx") {
+    try {
+      return await extractXlsx(entry.blob);
+    } catch {
+      return { note: "xlsx 解析失败" };
+    }
+  }
+  if (ext === "odt" || ext === "odp" || ext === "ods") {
+    try {
+      return await extractOdf(entry.blob);
+    } catch {
+      return { note: "ODF 文档解析失败" };
+    }
+  }
+  if (ext === "zip") {
+    return await extractZipArchive(entry.blob, entry.name);
+  }
+  if (ext === "gz" || ext === "tgz" || /\.tar\.gz$/i.test(entry.name)) {
+    return await extractTarGz(entry.blob, entry.name);
+  }
+  if (ext === "rar" || ext === "7z") {
+    return { note: `.${ext} 为专有压缩格式，无法解析；请改用 zip 或解压后上传` };
+  }
+  if (["doc", "ppt", "xls"].includes(ext)) {
+    return { note: `.${ext} 为旧版二进制 Office 格式，暂不支持自动提取正文；请另存为 .${ext}x 或 PDF 后上传` };
   }
   return { note: "二进制文件，暂不支持内容提取" };
 }

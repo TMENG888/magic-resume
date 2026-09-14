@@ -27,7 +27,7 @@ export function buildAgentSystemPrompt(resumeTitle: string): string {
 ${toolDocs}
 
 ## 工作协议（ReAct，每轮只输出一个 JSON 对象，不要输出任何其它文本）
-0. 输出格式硬性要求：必须是一个以 { 开始、以 } 结束的完整合法 JSON 对象，所有括号/引号完整闭合；禁止 markdown 代码围栏、禁止在 JSON 前后附加任何说明文字或字符。
+0. 输出格式硬性要求：必须是一个以 { 开始、以 } 结束的完整合法 JSON 对象，所有括号/引号完整闭合；禁止 markdown 代码围栏、禁止在 JSON 前后附加任何说明文字或字符。输出一个 JSON 对象后必须立即停止输出：禁止继续编写 [tool_result]、[assistant] 等后续内容，禁止伪造工具执行结果——工具由系统真实执行，结果由系统回填，你伪造的结果不会被采纳。
 1. 需要信息或需要修改简历时，输出：
    {"action": {"tool": "工具名", "args": { ... }}}
    系统会执行工具并以 [tool_result] 消息回填结果，然后你可以继续推理或再次调用。

@@ -85,8 +85,8 @@ export const AI_PROVIDER_DEFINITIONS: Record<AIProvider, ProviderDefinition> = {
     baseUrl: "https://api.deepseek.com/v1",
     protocol: "chat-completions",
     protocols: ["chat-completions"],
-    defaultModel: "deepseek-v4-flash",
-    pdfModel: "deepseek-v4-flash-vision-exp",
+    defaultModel: "deepseek-flash",
+    pdfModel: "deepseek-flash",
     keyUrl: "https://platform.deepseek.com",
   },
   gemini: {
@@ -179,23 +179,17 @@ export const BUILTIN_AI_MODELS: Record<AIProvider, readonly BuiltinAIModel[]> =
     ],
     deepseek: [
       {
-        id: "deepseek-v4-pro",
-        name: "DeepSeek V4 Pro",
-        description: "复杂写作与深度推理",
-        supportsPdf: false,
-      },
-      {
-        id: "deepseek-v4-flash",
-        name: "DeepSeek V4 Flash",
-        description: "快速、低成本的文字处理",
-        supportsPdf: false,
+        id: "deepseek-flash",
+        name: "DeepSeek V4.1 Flash",
+        description: "快速、低成本，支持图片理解（1M 上下文）",
+        supportsPdf: true,
         recommended: true,
       },
       {
-        id: "deepseek-v4-flash-vision-exp",
-        name: "DeepSeek V4 Vision",
-        description: "实验性图片理解模型",
-        supportsPdf: true,
+        id: "deepseek-v4-pro",
+        name: "DeepSeek V4 Pro",
+        description: "复杂写作与深度推理（即将下线，请求自动路由 Flash）",
+        supportsPdf: false,
       },
     ],
     gemini: [

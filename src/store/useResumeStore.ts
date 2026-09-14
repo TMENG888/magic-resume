@@ -1,6 +1,6 @@
 import { create } from "zustand";
-import { createJSONStorage, persist } from "zustand/middleware";
-import type { StateStorage } from "zustand/middleware";
+import { persist } from "zustand/middleware";
+import { createIDBStorage } from "./idbStorage";
 import { getFileHandle, verifyPermission } from "@/utils/fileSystem";
 import {
   BasicInfo,
@@ -109,32 +109,6 @@ const createDefaultCustomItem = (): CustomItem => ({
   dateRange: "",
   description: "",
   visible: true,
-});
-
-const warnedPersistFailures = new Set<string>();
-
-const warnPersistFailure = (name: string, error: unknown) => {
-  if (warnedPersistFailures.has(name)) {
-    return;
-  }
-
-  warnedPersistFailures.add(name);
-  console.warn(
-    `[resume-store] Failed to persist "${name}" to localStorage. Changes remain available in memory for this session.`,
-    error
-  );
-};
-
-const createSafeLocalStorage = (): StateStorage => ({
-  getItem: (name) => localStorage.getItem(name),
-  setItem: (name, value) => {
-    try {
-      localStorage.setItem(name, value);
-    } catch (error) {
-      warnPersistFailure(name, error);
-    }
-  },
-  removeItem: (name) => localStorage.removeItem(name),
 });
 
 const parseTimestamp = (value?: string): number | null => {
@@ -986,9 +960,9 @@ export const useResumeStore = create(
     }),
     {
       name: "resume-storage",
-      storage: createJSONStorage<PersistedResumeStore>(() =>
-        createSafeLocalStorage()
-      ),
+      storage: createIDBStorage<PersistedResumeStore>({
+        legacyLocalStorageKey: "resume-storage",
+      }),
       partialize: (state): PersistedResumeStore => ({
         resumes: state.resumes,
         activeResumeId: state.activeResumeId,
@@ -1010,3 +984,32 @@ export const useResumeStore = create(
     }
   )
 );
+
+const HYDRATION_TIMEOUT_MS = 5000;
+
+/**
+ * 等待简历 store 从 IndexedDB 完成异步水合。
+ *
+ * 在水合完成前 `resumes` 还是初始值，任何读取 store 做比较/决策的逻辑
+ * （如目录同步）都必须先等待此 promise，否则可能用空状态做出错误判断。
+ * SSR / 测试环境（无 IndexedDB）或水合超时后直接放行，避免永久挂起。
+ */
+export const whenResumeStoreHydrated = (): Promise<void> => {
+  if (typeof window === "undefined" || typeof indexedDB === "undefined") {
+    return Promise.resolve();
+  }
+  if (useResumeStore.persist.hasHydrated()) {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    const timeout = setTimeout(() => {
+      unsub();
+      resolve();
+    }, HYDRATION_TIMEOUT_MS);
+    const unsub = useResumeStore.persist.onFinishHydration(() => {
+      clearTimeout(timeout);
+      unsub();
+      resolve();
+    });
+  });
+};

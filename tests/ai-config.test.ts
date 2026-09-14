@@ -125,13 +125,106 @@ test("PDF capability follows known model families without a manual setting", () 
   assert.equal(modelSupportsPdf("qwen", "qwen3-max"), false);
   assert.equal(modelSupportsPdf("openai", "gpt-4o"), true);
   assert.equal(modelSupportsPdf("deepseek", "deepseek-chat"), false);
+  assert.equal(modelSupportsPdf("deepseek", "deepseek-flash"), true);
+  assert.equal(modelSupportsPdf("deepseek", "deepseek-v4-pro"), false);
   assert.equal(modelSupportsPdf("gemini", "gemini-2.5-flash"), true);
+});
+
+test("retired deepseek model names are migrated to deepseek-flash with pdf capability", () => {
+  const state = migrateAISettings({
+    models: [
+      {
+        id: "ds-text",
+        provider: "deepseek",
+        name: "DeepSeek V4 Flash",
+        apiKey: "sk-test",
+        model: "deepseek-v4-flash",
+        baseUrl: "https://api.deepseek.com/v1",
+        protocol: "chat-completions",
+      },
+      {
+        id: "ds-vision",
+        provider: "deepseek",
+        name: "DeepSeek V4 Vision",
+        apiKey: "sk-test",
+        model: "deepseek-v4-flash-vision-exp",
+        baseUrl: "https://api.deepseek.com/v1",
+        protocol: "chat-completions",
+      },
+    ],
+    textModelId: "ds-text",
+    pdfModelId: "ds-vision",
+  });
+  assert.equal(state.models.length, 2);
+  assert.ok(state.models.every((model) => model.model === "deepseek-flash"));
+  assert.ok(state.models.every((model) => model.supportsPdf));
+  assert.equal(state.textModelId, "ds-text");
+  assert.equal(state.pdfModelId, "ds-vision");
+});
+
+test("retired deepseek builtin profiles are rebuilt with the new catalog id, name and model", () => {
+  const state = migrateAISettings({
+    models: [
+      {
+        id: "builtin:deepseek:deepseek-v4-flash",
+        provider: "deepseek",
+        name: "DeepSeek V4 Flash",
+        apiKey: "sk-live",
+        model: "deepseek-v4-flash",
+        baseUrl: "https://api.deepseek.com/v1",
+        protocol: "chat-completions",
+      },
+    ],
+    textModelId: "builtin:deepseek:deepseek-v4-flash",
+    pdfModelId: "builtin:deepseek:deepseek-v4-flash",
+  });
+  assert.equal(state.models.length, 1);
+  assert.equal(state.models[0].id, "builtin:deepseek:deepseek-flash");
+  assert.equal(state.models[0].name, "DeepSeek V4.1 Flash");
+  assert.equal(state.models[0].model, "deepseek-flash");
+  assert.equal(state.models[0].apiKey, "sk-live");
+  assert.ok(state.models[0].supportsPdf);
+  // 分配关系不断链：旧 id 重映射到新 id
+  assert.equal(state.textModelId, "builtin:deepseek:deepseek-flash");
+  assert.equal(state.pdfModelId, "builtin:deepseek:deepseek-flash");
+});
+
+test("migrating a retired builtin skips duplicates when the new model already exists", () => {
+  const state = migrateAISettings({
+    models: [
+      {
+        id: "builtin:deepseek:deepseek-v4-flash",
+        provider: "deepseek",
+        name: "DeepSeek V4 Flash",
+        apiKey: "sk-old",
+        model: "deepseek-v4-flash",
+        baseUrl: "https://api.deepseek.com/v1",
+        protocol: "chat-completions",
+      },
+      {
+        id: "builtin:deepseek:deepseek-flash",
+        provider: "deepseek",
+        name: "DeepSeek V4.1 Flash",
+        apiKey: "sk-new",
+        model: "deepseek-flash",
+        baseUrl: "https://api.deepseek.com/v1",
+        protocol: "chat-completions",
+      },
+    ],
+    textModelId: "builtin:deepseek:deepseek-v4-flash",
+    pdfModelId: null,
+  });
+  assert.equal(state.models.length, 1);
+  assert.equal(state.models[0].apiKey, "sk-new");
+  // 旧分配重映射到已存在的新 profile，不会指向丢失的模型
+  assert.equal(state.textModelId, "builtin:deepseek:deepseek-flash");
 });
 
 test("every provider exposes built-in models that share one provider key", () => {
   for (const provider of AI_PROVIDERS) {
     const catalog = BUILTIN_AI_MODELS[provider];
-    assert.ok(catalog.length >= 3);
+    // deepseek 官方现行仅两个模型（V4.1 Flash / V4 Pro），故最低为 2
+    assert.ok(catalog.length >= 2);
     assert.equal(new Set(catalog.map((item) => item.id)).size, catalog.length);
     assert.ok(catalog.some((item) => item.supportsPdf));
     const profiles = catalog.map((item) =>

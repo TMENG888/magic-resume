@@ -1,9 +1,9 @@
 import { create } from "zustand";
 import {
-  createJSONStorage,
   persist,
   type PersistStorage,
 } from "zustand/middleware";
+import { createIDBStorage } from "./idbStorage";
 import {
   canModelParsePdf,
   getTaskModel,
@@ -74,7 +74,10 @@ export const createAIConfigStore = (storage?: PersistStorage<AISettingsData>) =>
         name: "ai-config-storage",
         version: 1,
         storage:
-          storage ?? createJSONStorage<AISettingsData>(() => localStorage),
+          storage ??
+          createIDBStorage<AISettingsData>({
+            legacyLocalStorageKey: "ai-config-storage",
+          }),
         partialize: ({ models, textModelId, pdfModelId }) => ({
           models,
           textModelId,

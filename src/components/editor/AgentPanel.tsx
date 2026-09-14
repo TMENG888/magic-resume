@@ -26,9 +26,9 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { cn } from "@/lib/utils";
 import { useResumeStore } from "@/store/useResumeStore";
 import { useAIConfigStore } from "@/store/useAIConfigStore";
+import { useAgentChatStore } from "@/store/useAgentChatStore";
 import { getTaskModel, toAIConnection } from "@/config/ai-models";
 import { MaterialPickerDialog, AttachmentChips } from "@/components/shared/materials/MaterialPickerDialog";
-import type { MaterialAttachment } from "@/lib/material-context";
 import { runAgentTurn, type AgentTurn } from "@/lib/agent/agentClient";
 
 const TOOL_LABELS: Record<string, string> = {
@@ -107,15 +107,6 @@ const renderMarkdownLite = (text: string) => {
   return nodes;
 };
 
-interface ChatItem {
-  id: string;
-  kind: "user" | "assistant" | "tool" | "notice";
-  content: string;
-  tool?: string;
-  toolOk?: boolean;
-  toolSummary?: string;
-}
-
 const generateId = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
 export function AgentPanel({ onClose }: { onClose: () => void }) {
@@ -125,16 +116,25 @@ export function AgentPanel({ onClose }: { onClose: () => void }) {
   const textModel = getTaskModel(aiConfig, "text");
   const connectionConfigured = !!(textModel && textModel.apiKey.trim() && textModel.model.trim());
 
-  const [items, setItems] = useState<ChatItem[]>([]);
-  const [turns, setTurns] = useState<AgentTurn[]>([]);
-  // 会话 id：同一面板会话内多次回合共享（用于日志归组），清空对话后开新会话
-  const sessionRef = useRef<string>(generateId());
-  const [input, setInput] = useState("");
-  const [attachments, setAttachments] = useState<MaterialAttachment[]>([]);
+  // 对话状态全部来自全局 store：面板 remount（如浏览器缩放触发布局重建）不再丢记录，
+  // 且经 idbStorage 持久化，刷新页面后对话同样可恢复
+  const items = useAgentChatStore((s) => s.items);
+  const turns = useAgentChatStore((s) => s.turns);
+  const sessionId = useAgentChatStore((s) => s.sessionId);
+  const input = useAgentChatStore((s) => s.input);
+  const attachments = useAgentChatStore((s) => s.attachments);
+  const running = useAgentChatStore((s) => s.running);
+  const currentTool = useAgentChatStore((s) => s.currentTool);
+  const pushItem = useAgentChatStore((s) => s.pushItem);
+  const appendTurns = useAgentChatStore((s) => s.appendTurns);
+  const setRunning = useAgentChatStore((s) => s.setRunning);
+  const setCurrentTool = useAgentChatStore((s) => s.setCurrentTool);
+  const setInput = useAgentChatStore((s) => s.setInput);
+  const setAttachments = useAgentChatStore((s) => s.setAttachments);
+  const setAbortController = useAgentChatStore((s) => s.setAbortController);
+  const abort = useAgentChatStore((s) => s.abort);
+  const newSession = useAgentChatStore((s) => s.newSession);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [running, setRunning] = useState(false);
-  const [currentTool, setCurrentTool] = useState<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -172,14 +172,13 @@ export function AgentPanel({ onClose }: { onClose: () => void }) {
       return;
     }
 
-    const userItem: ChatItem = { id: generateId(), kind: "user", content: message };
-    setItems((prev) => [...prev, userItem]);
+    pushItem({ id: generateId(), kind: "user", content: message });
     setInput("");
     setRunning(true);
     setCurrentTool(null);
 
     const controller = new AbortController();
-    abortRef.current = controller;
+    setAbortController(controller);
 
     let finalTurns: AgentTurn[] = [];
     try {
@@ -190,7 +189,7 @@ export function AgentPanel({ onClose }: { onClose: () => void }) {
         connection: toAIConnection(textModel),
         resumeTitle: activeResume?.title ?? "未命名简历",
         signal: controller.signal,
-        sessionId: sessionRef.current,
+        sessionId,
         onEvent: (event) => {
           switch (event.type) {
             case "tool_start":
@@ -198,21 +197,18 @@ export function AgentPanel({ onClose }: { onClose: () => void }) {
               break;
             case "tool_result": {
               setCurrentTool(null);
-              setItems((prev) => [
-                ...prev,
-                {
-                  id: generateId(),
-                  kind: "tool",
-                  content: event.tool,
-                  tool: event.tool,
-                  toolOk: event.ok,
-                  toolSummary: event.summary,
-                },
-              ]);
+              pushItem({
+                id: generateId(),
+                kind: "tool",
+                content: event.tool,
+                tool: event.tool,
+                toolOk: event.ok,
+                toolSummary: event.summary,
+              });
               break;
             }
             case "final": {
-              setItems((prev) => [...prev, { id: generateId(), kind: "assistant", content: event.reply }]);
+              pushItem({ id: generateId(), kind: "assistant", content: event.reply });
               finalTurns = [
                 { role: "assistant", content: JSON.stringify({ reply: event.reply }) },
               ];
@@ -220,14 +216,11 @@ export function AgentPanel({ onClose }: { onClose: () => void }) {
               break;
             }
             case "notice": {
-              setItems((prev) => [...prev, { id: generateId(), kind: "notice", content: event.message }]);
+              pushItem({ id: generateId(), kind: "notice", content: event.message });
               break;
             }
             case "error": {
-              setItems((prev) => [
-                ...prev,
-                { id: generateId(), kind: "assistant", content: `⚠️ ${event.message}` },
-              ]);
+              pushItem({ id: generateId(), kind: "assistant", content: `⚠️ ${event.message}` });
               setCurrentTool(null);
               break;
             }
@@ -245,35 +238,24 @@ export function AgentPanel({ onClose }: { onClose: () => void }) {
         content: JSON.stringify({ reply: "（本轮未产生回复）" }),
       };
       const userTurn: AgentTurn = { role: "user", content: message };
-      setTurns((prev) => [
-        ...prev,
+      appendTurns([
         userTurn,
         ...(finalTurns.length ? finalTurns : [fallbackTurn]),
       ]);
       setAttachments([]);
       setRunning(false);
       setCurrentTool(null);
-      abortRef.current = null;
+      setAbortController(null);
     }
   };
 
   const handleClear = () => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setItems([]);
-    setTurns([]);
-    setAttachments([]);
-    setRunning(false);
-    setCurrentTool(null);
-    sessionRef.current = generateId();
+    newSession();
   };
 
   // 停止当前生成（无轮次上限，用户随时可中止）
   const handleStop = () => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setRunning(false);
-    setCurrentTool(null);
+    abort();
   };
 
   const modelLabel = useMemo(() => {

@@ -12,6 +12,7 @@
 import { generateUUID } from "@/utils/uuid";
 import {
   baseName,
+  extensionOf,
   extractMaterialContent,
   extractMaterialsDir,
   extractMaterialsFile,
@@ -23,13 +24,15 @@ import {
 export interface MaterialAttachment {
   id: string;
   source: "materials" | "local";
-  /** materials: 库内相对路径；local: 文件名（含本地相对路径提示） */
+  /** materials: 库内相对路径；local: 文件名（含本地相对路径提示）或文件夹名 */
   path: string;
   name: string;
   kind: "file" | "dir";
   size?: number;
-  /** 仅本地文件 */
+  /** 仅本地文件（kind === "file"） */
   file?: File;
+  /** 仅本地文件夹（kind === "dir"）：内存中包含的全部文件（webkitRelativePath 保留目录结构） */
+  files?: File[];
 }
 
 export const createMaterialsAttachment = (
@@ -43,8 +46,51 @@ export const attachmentLabel = (attachment: MaterialAttachment) =>
 export async function extractAttachment(attachment: MaterialAttachment): Promise<MaterialExtractResult[]> {
   try {
     if (attachment.kind === "dir") {
-      if (attachment.source !== "materials") return [];
-      return await extractMaterialsDir(attachment.path);
+      if (attachment.source === "materials") {
+        return await extractMaterialsDir(attachment.path);
+      }
+      // 本地文件夹：遍历内存 File 列表，路径取 webkitRelativePath，
+      // 与「我的资料」目录附件保持一致的应用方式（按路径逐个提取，带预算限制）
+      const files = attachment.files ?? [];
+      const maxFiles = 30;
+      const results: MaterialExtractResult[] = [];
+      let used = 0;
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        const relative =
+          (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+        if (index >= maxFiles) {
+          results.push({
+            path: relative,
+            name: relative,
+            ext: extensionOf(file.name),
+            kind: "file",
+            size: file.size,
+            note: "（已达文件夹内文件数上限，跳过）",
+          });
+          continue;
+        }
+        const extracted = await extractMaterialContent({ name: relative, size: file.size, blob: file });
+        const cost = extracted.content?.length ?? 0;
+        let content = extracted.content;
+        let truncated = extracted.truncated;
+        if (content && used + cost > MATERIAL_CONTEXT_CHAR_LIMIT) {
+          content = `${content.slice(0, Math.max(0, MATERIAL_CONTEXT_CHAR_LIMIT - used))}…（因总预算截断）`;
+          truncated = true;
+        }
+        used += content?.length ?? 0;
+        results.push({
+          path: relative,
+          name: relative,
+          ext: extensionOf(file.name),
+          kind: "file",
+          size: file.size,
+          content,
+          note: extracted.note,
+          truncated,
+        });
+      }
+      return results;
     }
     if (attachment.source === "materials") {
       return [await extractMaterialsFile(attachment.path)];

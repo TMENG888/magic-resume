@@ -50,7 +50,7 @@ export function MaterialPickerDialog({
   const [selected, setSelected] = useState<MaterialAttachment[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const localInputRef = useRef<HTMLInputElement>(null);
-  const localFolderInputRef = useRef<HTMLInputElement>(null);
+  const localFolderInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (open) {
@@ -59,13 +59,16 @@ export function MaterialPickerDialog({
     }
   }, [open, loaded, refresh]);
 
-  useEffect(() => {
-    const input = localFolderInputRef.current;
-    if (input) {
-      input.setAttribute("webkitdirectory", "");
-      input.setAttribute("directory", "");
+  // webkitdirectory 属性 React 不识别，需手动设置；由于 Dialog/Tabs 非激活时
+  // 不渲染内容，必须用 ref callback 在 input 实际挂载时设置（useEffect [] 只会
+  // 在首次挂载时跑一次，那时 input 尚不存在，属性会丢失 → 文件夹选择退化为文件选择）
+  const attachFolderPicker = (el: HTMLInputElement | null) => {
+    localFolderInputRef.current = el;
+    if (el) {
+      el.setAttribute("webkitdirectory", "");
+      el.setAttribute("directory", "");
     }
-  }, []);
+  };
 
   const toggleExpand = (path: string) => {
     setExpanded((prev) => {
@@ -195,6 +198,38 @@ export function MaterialPickerDialog({
     if (localFolderInputRef.current) localFolderInputRef.current.value = "";
   };
 
+  /** 本地文件夹：按顶层目录聚合为一个文件夹附件（保留目录结构，AI 按路径应用） */
+  const handleLocalFolder = (files: FileList | null) => {
+    if (!files?.length) return;
+    const groups = new Map<string, File[]>();
+    for (const file of Array.from(files)) {
+      const relative = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+      const root = relative.split("/")[0] || file.name;
+      const list = groups.get(root) ?? [];
+      list.push(file);
+      groups.set(root, list);
+    }
+    const additions: MaterialAttachment[] = [];
+    const groupEntries = Array.from(groups.entries());
+    for (const [root, list] of groupEntries) {
+      additions.push(
+        createMaterialsAttachment({
+          source: "local",
+          path: root,
+          name: root,
+          kind: "dir",
+          size: list.reduce((sum: number, file: File) => sum + file.size, 0),
+          files: list,
+        }),
+      );
+    }
+    setSelected((prev) => {
+      const existing = new Set(prev.map((item) => `${item.source}:${item.path}`));
+      return [...prev, ...additions.filter((item) => !existing.has(`local:${item.path}`))];
+    });
+    if (localFolderInputRef.current) localFolderInputRef.current.value = "";
+  };
+
   const handleConfirm = () => {
     if (!selected.length) {
       toast.error(t("attachments"));
@@ -268,33 +303,32 @@ export function MaterialPickerDialog({
               onChange={(e) => handleLocalFiles(e.target.files)}
             />
             <input
-              ref={localFolderInputRef}
+              ref={attachFolderPicker}
               type="file"
               multiple
               className="hidden"
-              onChange={(e) => handleLocalFiles(e.target.files)}
+              onChange={(e) => handleLocalFolder(e.target.files)}
             />
-            <button
-              type="button"
-              className="mt-3 flex h-[280px] w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border/80 bg-muted/20 transition-colors hover:border-primary/50 hover:bg-primary/5"
-              onClick={() => localInputRef.current?.click()}
-            >
-              <HardDrive className="h-8 w-8 text-muted-foreground/60" />
-              <span className="text-sm font-medium text-foreground">{t("pickLocal")}</span>
-              <span className="max-w-[300px] text-xs text-muted-foreground">
-                {tm("emptyDescription")}
-              </span>
-            </button>
-            <div className="mt-2 flex gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 rounded-lg text-xs"
+            {/* 文件 / 文件夹双一等入口：文件夹附件保留目录结构，AI 按路径应用 */}
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                className="flex h-24 flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed border-border/80 bg-muted/20 transition-colors hover:border-primary/50 hover:bg-primary/5"
+                onClick={() => localInputRef.current?.click()}
+              >
+                <HardDrive className="h-6 w-6 text-muted-foreground/70" />
+                <span className="text-[13px] font-medium text-foreground">{tm("uploadFile")}</span>
+                <span className="text-[10px] text-muted-foreground">{t("pickLocal")}</span>
+              </button>
+              <button
+                type="button"
+                className="flex h-24 flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed border-border/80 bg-muted/20 transition-colors hover:border-primary/50 hover:bg-primary/5"
                 onClick={() => localFolderInputRef.current?.click()}
               >
-                <Folder className="mr-1 h-3.5 w-3.5" />
-                {tm("uploadFolder")}
-              </Button>
+                <Folder className="h-6 w-6 text-amber-500/80" />
+                <span className="text-[13px] font-medium text-foreground">{tm("uploadFolder")}</span>
+                <span className="text-[10px] text-muted-foreground">{tm("keepFolderStructure")}</span>
+              </button>
             </div>
             {localTotal > 0 && (
               <ScrollArea className="mt-2 h-[120px] shrink-0 rounded-xl border border-border/60 bg-muted/20 p-2">
@@ -303,7 +337,14 @@ export function MaterialPickerDialog({
                     .filter((item) => item.source === "local")
                     .map((item) => (
                       <div key={item.id} className="flex items-center justify-between gap-2 rounded-lg px-2 py-1 text-xs hover:bg-muted/40">
-                        <span className="truncate">{item.name}</span>
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          {item.kind === "dir" ? (
+                            <Folder className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+                          ) : (
+                            <File className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          )}
+                          <span className="truncate">{item.name}</span>
+                        </span>
                         <span className="shrink-0 text-[10px] text-muted-foreground">
                           {formatBytes(item.size ?? 0)}
                         </span>
