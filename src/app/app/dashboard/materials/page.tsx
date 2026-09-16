@@ -75,6 +75,7 @@ import {
   readMaterialsFileText,
   renameMaterialsNode,
   saveFilesToMaterials,
+  screenUploadFiles,
   type MaterialNode,
 } from "@/utils/materials";
 import { cn } from "@/lib/utils";
@@ -271,9 +272,18 @@ export default function MaterialsPage() {
 
   const handleUpload = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;
+    const screen = screenUploadFiles(Array.from(files));
+    if (screen.blocked) {
+      toast.error(screen.blocked);
+      return;
+    }
+    if (screen.skippedLarge.length) {
+      toast.warning(t("uploadSkippedLarge", { count: screen.skippedLarge.length }));
+    }
+    if (!screen.accepted.length) return;
     setBusy(true);
     try {
-      const { saved, failed } = await saveFilesToMaterials(Array.from(files), currentPath);
+      const { saved, failed } = await saveFilesToMaterials(screen.accepted, currentPath);
       if (saved.length) toast.success(t("uploaded", { count: saved.length }));
       if (failed.length) {
         // 具体原因直接展示（配额/同名冲突/占用…），不再吞成笼统的“上传失败”
@@ -609,6 +619,7 @@ export default function MaterialsPage() {
                     </button>
                   )}
                   {currentNodes.map((node, index) => {
+                    if (index >= 600) return null; // 大目录渲染保护：OPFS 上万文件时避免 DOM 卡死
                     const isSelected = selectedPaths.has(node.path);
                     return (
                     <motion.div
@@ -718,6 +729,11 @@ export default function MaterialsPage() {
                     </motion.div>
                     );
                   })}
+                  {currentNodes.length > 600 && (
+                    <div className="px-3 py-2 text-center text-xs text-muted-foreground">
+                      {t("listTruncated", { count: currentNodes.length - 600 })}
+                    </div>
+                  )}
                 </div>
               )}
               {loading && !loaded && (

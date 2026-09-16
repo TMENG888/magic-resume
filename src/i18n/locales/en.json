@@ -420,7 +420,7 @@
       "statusEmpty": "Library is empty",
       "uploadFile": "Upload Files",
       "uploadFolder": "Upload Folder",
-      "keepFolderStructure": "Keep folder structure",
+      "keepFolderStructure": "Keeps structure · saved to materials",
       "newFolder": "New Folder",
       "refresh": "Refresh",
       "unsupported": "This browser does not support the OPFS file system. Use the latest Chrome / Edge via localhost",
@@ -464,7 +464,16 @@
       "batchDeleteConfirmTitle": "Delete selected items",
       "batchDeleteConfirmDescription": "{count} selected items will be permanently deleted. This action cannot be undone.",
       "batchDeleted": "Deleted {count} items",
-      "batchDeletePartial": "Deleted {ok} items, {failed} failed"
+      "batchDeletePartial": "Deleted {ok} items, {failed} failed",
+      "savingToLibrary": "Saving to materials... ({done} processed)",
+      "savedToLibrary": "Saved {count} file(s) to materials",
+      "saveFailedCount": "{count} file(s) failed to save",
+      "saveFailed": "Failed to save to materials",
+      "savedAsRef": "saved as reference",
+      "listTruncated": "{count} more item(s) hidden (see Materials page for all)",
+      "uploadFolderHint": "Auto-saved to materials, AI reads on demand",
+      "uploadSkippedLarge": "{count} oversized file(s) (>100MB) skipped",
+      "uploadBlockedHint": "Upload blocked"
     },
     "agent": {
       "title": "PI Resume Agent",

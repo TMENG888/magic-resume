@@ -85,7 +85,7 @@ export const useAgentChatStore = create<AgentChatState>()(
           items: [...state.items, item].slice(-MAX_ITEMS),
         })),
       appendTurns: (turns) =>
-        set((state) => ({ turns: [...state.turns, ...turns] })),
+        set((state) => ({ turns: [...state.turns, ...turns].slice(-400) })), // 上限防长会话无限增长
       setRunning: (running) => set({ running }),
       setCurrentTool: (currentTool) => set({ currentTool }),
       setInput: (input) => set({ input }),
@@ -120,8 +120,33 @@ export const useAgentChatStore = create<AgentChatState>()(
         turns: state.turns,
         sessionId: state.sessionId,
         input: state.input,
-        attachments: state.attachments,
+        // 附件只持久化路径引用元数据，剥离 files（File 对象数组）：
+        // 每次任意 state 变化 persist 都会结构化克隆整个 state，残留的
+        // 大 File 数组会被反复克隆，是内存打爆的隐患
+        attachments: state.attachments.map((item) =>
+          stripFileRefs(item)
+        ),
       }),
     }
   )
 );
+
+/** 附件去掉 files（File 对象数组），只留路径引用元数据 */
+const stripFileRefs = (item: MaterialAttachment): MaterialAttachment => {
+  if (!item.files) return item;
+  const { files: _files, ...rest } = item;
+  return rest as MaterialAttachment;
+};
+
+// 旧版本持久化数据可能已带 files 字段（历史 local 附件）：persist 是异步水合，
+// 需在水合完成后再清洗一次，避免残留 File 数组被后续克隆反复复制
+if (typeof window !== "undefined") {
+  useAgentChatStore.persist.onFinishHydration(() => {
+    const state = useAgentChatStore.getState();
+    if (state.attachments.some((item) => item.files)) {
+      useAgentChatStore.setState({
+        attachments: state.attachments.map(stripFileRefs),
+      });
+    }
+  });
+}

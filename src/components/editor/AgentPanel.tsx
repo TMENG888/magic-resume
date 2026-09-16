@@ -39,6 +39,8 @@ const TOOL_LABELS: Record<string, string> = {
   set_resume_theme: "主题设置",
   list_materials: "列出我的资料",
   read_material: "读取资料",
+  set_avatar: "设置头像",
+  export_resume: "导出简历",
 };
 
 /** 轻量 Markdown 渲染（加粗 / 行内代码 / 列表 / 标题） */

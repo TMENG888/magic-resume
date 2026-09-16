@@ -117,10 +117,10 @@ export async function runAgentTurn(options: RunAgentOptions): Promise<void> {
   const system = buildAgentSystemPrompt(resumeTitle);
   systemPrompt = system;
 
-  // 组装本轮用户消息：附件上下文 + 用户输入
+  // 组装本轮用户消息：附件上下文 + 用户输入（reference 模式：只注入路径清单，AI 用 read_material 按需读取）
   let contextBlock = "";
   try {
-    contextBlock = await buildMaterialContextBlock(attachments, { totalCharLimit: 40_000 });
+    contextBlock = await buildMaterialContextBlock(attachments, { totalCharLimit: 40_000, mode: "reference" });
   } catch (error) {
     onEvent({ type: "error", message: `附件读取失败：${error instanceof Error ? error.message : String(error)}` });
     outcome = {

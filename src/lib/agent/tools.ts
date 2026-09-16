@@ -6,7 +6,10 @@ import {
   extractMaterialsFile,
   flattenNodes,
   listMaterialsTree,
+  readMaterialsFileBlob,
+  saveFilesToMaterials,
 } from "@/utils/materials";
+import { exportToLongPagePdf } from "@/utils/export";
 import { useResumeStore } from "@/store/useResumeStore";
 import type { ResumeData } from "@/types/resume";
 
@@ -70,6 +73,24 @@ export const AGENT_TOOLS: AgentToolDef[] = [
     description:
       "按相对路径读取「我的资料」中的文件或文件夹。支持：文本/代码/配置类、PDF（自动提取文字）、docx/pptx/xlsx/odt（自动提取正文）、zip 压缩包（列出内部清单并提取其中的文本文件）、gz。传入文件夹路径则递归读取其中所有文件（自动跳过无法提取的）。",
     parameters: { path: "「我的资料」中的相对路径，如 个人材料/简历.pdf 或 项目集/" },
+  },
+  {
+    name: "set_avatar",
+    description:
+      "将「我的资料」中的图片设置为当前简历头像（自动压缩到适合简历的尺寸，不影响原文件），或移除头像。仅支持 jpg/png/webp 图片。",
+    parameters: {
+      path: "「我的资料」中的图片相对路径，如 个人材料/证件照.jpg；传空字符串 \"\" 表示移除头像",
+      visible: "可选，true 显示头像（默认）/ false 隐藏",
+    },
+  },
+  {
+    name: "export_resume",
+    description:
+      "将当前简历导出并保存到「我的资料/导出/」目录。format=pdf 为可视化长页 PDF（基于当前预览渲染，用户可在「我的资料」页下载）；format=json 为结构化数据备份。导出前请确认内容已修改完毕。",
+    parameters: {
+      format: "导出格式：\"pdf\"（默认，可视化简历文件）或 \"json\"（结构化数据备份）",
+      fileName: "可选，自定义文件名（不含扩展名，默认用简历标题）",
+    },
   },
 ];
 
@@ -320,9 +341,125 @@ export async function readMaterialForAgent(args: Record<string, unknown>): Promi
 /* 分发                                                                */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* 头像图片压缩                                                        */
+/* ------------------------------------------------------------------ */
+
+/** 将图片压缩到适合简历的头像尺寸（最长边 maxEdge，JPEG 85%），返回 dataURL。
+ *  原图可能数 MB，直接 base64 会翻倍膨胀简历存储/渲染，必须压缩。 */
+async function compressAvatarImage(
+  blob: Blob,
+  maxEdge: number,
+): Promise<{ dataUrl: string; width: number; height: number; bytes: number }> {
+  const bitmap = await createImageBitmap(blob);
+  try {
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("canvas 不可用");
+    ctx.fillStyle = "#ffffff"; // 透明底填白，避免 PNG 透明区域变黑
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(bitmap, 0, 0, width, height);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+    return { dataUrl, width, height, bytes: Math.round((dataUrl.length - 22) * 0.75) };
+  } finally {
+    bitmap.close?.();
+  }
+}
+
 export async function executeAgentTool(name: string, args: Record<string, unknown>): Promise<AgentToolResult> {
   try {
     switch (name) {
+      case "export_resume": {
+        const store = useResumeStore.getState();
+        const resume = store.activeResume;
+        if (!resume) return { ok: false, summary: "错误：没有打开的简历" };
+        const format = typeof args.format === "string" ? args.format.toLowerCase() : "pdf";
+        const rawName = typeof args.fileName === "string" && args.fileName.trim()
+          ? args.fileName.trim()
+          : resume.title || "resume";
+        const safeName = rawName.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80) || "resume";
+        const exportedAt = new Date().toISOString().slice(0, 10);
+        const fileName = `${safeName}-${exportedAt}`;
+        if (format === "json") {
+          const json = JSON.stringify(
+            {
+              title: resume.title,
+              basic: resume.basic,
+              education: resume.education,
+              experience: resume.experience,
+              projects: resume.projects,
+              skillContent: resume.skillContent,
+              selfEvaluationContent: resume.selfEvaluationContent,
+              menuSections: resume.menuSections,
+              globalSettings: resume.globalSettings,
+            },
+            null,
+            2,
+          );
+          const file = new File([json], `${fileName}.json`, { type: "application/json" });
+          const { saved } = await saveFilesToMaterials([file], "导出");
+          if (!saved.length) return { ok: false, summary: "错误：保存到「我的资料」失败" };
+          return {
+            ok: true,
+            summary: `已导出结构化数据到「我的资料/导出/${fileName}.json」（${Math.round(json.length / 1024)}KB），用户可在「我的资料」页预览或下载`,
+          };
+        }
+        if (format !== "pdf") {
+          return { ok: false, summary: `错误：不支持的导出格式 "${format}"（仅支持 pdf / json）` };
+        }
+        if (typeof document === "undefined" || !document.getElementById("resume-preview")) {
+          return { ok: false, summary: "错误：未找到简历预览区（PDF 导出基于当前预览渲染）。请确认简历编辑页已打开且预览可见" };
+        }
+        const result = await exportToLongPagePdf({
+          elementId: "resume-preview",
+          title: safeName,
+          pagePadding: resume.globalSettings?.pagePadding || 0,
+          fontFamily: resume.globalSettings?.fontFamily,
+          mode: "blob",
+        });
+        if (!result?.blob) return { ok: false, summary: "错误：PDF 生成失败" };
+        const file = new File([result.blob], `${fileName}.pdf`, { type: "application/pdf" });
+        const { saved } = await saveFilesToMaterials([file], "导出");
+        if (!saved.length) return { ok: false, summary: "错误：保存到「我的资料」失败" };
+        return {
+          ok: true,
+          summary: `已导出 PDF 到「我的资料/导出/${fileName}.pdf」（${Math.round(result.blob.size / 1024)}KB），用户可在「我的资料」页预览或下载`,
+        };
+      }
+      case "set_avatar": {
+        const store = useResumeStore.getState();
+        const resume = store.activeResume;
+        if (!resume) return { ok: false, summary: "错误：没有打开的简历" };
+        const rawPath = typeof args.path === "string" ? args.path.trim() : "";
+        const visible = args.visible !== false;
+        if (!rawPath) {
+          store.updateBasicInfo({ photo: "" });
+          return { ok: true, summary: "已移除头像" };
+        }
+        if (!/\.(jpe?g|png|webp)$/i.test(rawPath)) {
+          return { ok: false, summary: `错误：${rawPath} 不是支持的图片格式（仅支持 jpg/png/webp）` };
+        }
+        let blob: Blob;
+        try {
+          blob = await readMaterialsFileBlob(rawPath);
+        } catch {
+          return { ok: false, summary: `错误：「我的资料」中找不到图片 ${rawPath}（可先用 list_materials 确认路径）` };
+        }
+        const compressed = await compressAvatarImage(blob, 400);
+        store.updateBasicInfo({
+          photo: compressed.dataUrl,
+          photoConfig: { ...(resume.basic.photoConfig ?? {}), visible },
+        });
+        return {
+          ok: true,
+          summary: `已将「${rawPath}」设置为头像（压缩至 ${Math.round(compressed.bytes / 1024)}KB，${compressed.width}×${compressed.height}，${visible ? "显示" : "隐藏"}）`,
+        };
+      }
       case "get_resume": {
         const resume = useResumeStore.getState().activeResume;
         if (!resume) return { ok: false, summary: "错误：没有打开的简历" };

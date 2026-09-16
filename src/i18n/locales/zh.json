@@ -421,7 +421,7 @@
       "statusEmpty": "资料库为空",
       "uploadFile": "上传文件",
       "uploadFolder": "上传文件夹",
-      "keepFolderStructure": "保留目录结构",
+      "keepFolderStructure": "保留目录结构 · 存入「我的资料」",
       "newFolder": "新建文件夹",
       "refresh": "刷新",
       "unsupported": "当前浏览器不支持 OPFS 文件系统，请使用最新版 Chrome / Edge 并通过 localhost 访问",
@@ -465,7 +465,16 @@
       "batchDeleteConfirmTitle": "确认批量删除",
       "batchDeleteConfirmDescription": "选中的 {count} 项将被永久删除，此操作不可恢复。",
       "batchDeleted": "已删除 {count} 项",
-      "batchDeletePartial": "已删除 {ok} 项，{failed} 项失败"
+      "batchDeletePartial": "已删除 {ok} 项，{failed} 项失败",
+      "savingToLibrary": "正在保存到「我的资料」…（已处理 {done} 个）",
+      "savedToLibrary": "已保存 {count} 个文件到「我的资料」",
+      "saveFailedCount": "{count} 个文件保存失败",
+      "saveFailed": "保存到「我的资料」失败",
+      "savedAsRef": "已存为路径引用",
+      "listTruncated": "还有 {count} 项未展示（请到「我的资料」页查看全部）",
+      "uploadFolderHint": "自动保存到「我的资料」，AI 按需读取内容",
+      "uploadSkippedLarge": "{count} 个超大文件（>100MB）已跳过上传",
+      "uploadBlockedHint": "已阻止本次上传"
     },
     "agent": {
       "title": "PI 简历智能体",

@@ -186,10 +186,10 @@ export async function listMaterialsTree(): Promise<MaterialNode[]> {
   return listDirHandle(root, "", 12);
 }
 
-/** 列出某个子目录（不递归） */
-export async function listMaterialsDir(path: string): Promise<MaterialNode[]> {
+/** 列出某个子目录；depth=0 只列第一层，depth>0 递归到指定深度（-1 表示无限，慎用于大目录） */
+export async function listMaterialsDir(path: string, depth = 0): Promise<MaterialNode[]> {
   const dir = await getDirHandleByPath(path);
-  return listDirHandle(dir, normalizeSegments(path).join("/"), 0);
+  return listDirHandle(dir, normalizeSegments(path).join("/"), depth);
 }
 
 export interface MaterialStats {
@@ -269,12 +269,71 @@ export interface SaveFilesResult {
   failed: { file: string; reason: string }[];
 }
 
+/* ------------------------------------------------------------------ */
+/* 上传体检与批量写入保护                                              */
+/* ------------------------------------------------------------------ */
+
+/** 单次上传文件数上限（超过则整批拒绝）*/
+export const UPLOAD_MAX_FILES = 1000;
+/** 单文件大小上限（超大文件跳过：OPFS 写大文件易触发浏览器内存/配额问题，且 AI 无需）*/
+export const UPLOAD_MAX_FILE_SIZE = 100 * 1024 * 1024;
+/** 单次上传总大小上限 */
+export const UPLOAD_MAX_TOTAL_SIZE = 500 * 1024 * 1024;
+
+export interface UploadScreenResult {
+  /** 允许上传的文件（已按单文件/总量上限过滤）*/
+  accepted: File[];
+  /** 被跳过的超大文件 */
+  skippedLarge: { name: string; size: number }[];
+  /** 整批被拒的原因（非空时 accepted 为空）*/
+  blocked?: string;
+  totalCount: number;
+  totalBytes: number;
+}
+
+/** 上传前体检：拦截超大批量/超大文件，防止浏览器内存打爆（历史教训：上万文件直接崩浏览器）。
+ *  三个入口共用：智能体选择器本地落盘、「我的资料」页上传。 */
+export function screenUploadFiles(files: File[]): UploadScreenResult {
+  const totalCount = files.length;
+  const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+  if (totalCount > UPLOAD_MAX_FILES) {
+    return {
+      accepted: [],
+      skippedLarge: [],
+      blocked: `所选文件夹包含 ${totalCount} 个文件，超过单次上传上限 ${UPLOAD_MAX_FILES} 个。建议：把文件夹压缩为 zip 后上传（AI 可读取 zip 清单与内部文本文件），或只上传核心资料。`,
+      totalCount,
+      totalBytes,
+    };
+  }
+  const accepted: File[] = [];
+  const skippedLarge: { name: string; size: number }[] = [];
+  let used = 0;
+  for (const file of files) {
+    if (file.size > UPLOAD_MAX_FILE_SIZE) {
+      skippedLarge.push({ name: file.name, size: file.size });
+      continue;
+    }
+    if (used + file.size > UPLOAD_MAX_TOTAL_SIZE) {
+      skippedLarge.push({ name: file.name, size: file.size });
+      continue;
+    }
+    used += file.size;
+    accepted.push(file);
+  }
+  return { accepted, skippedLarge, totalCount, totalBytes };
+}
+
 /** 保存一批文件到指定目录；保留 File.webkitRelativePath 的完整目录结构（含所选文件夹名）。
  *
  * 单个文件失败不中断整批（结果中返回 failed 明细）；
  * 文件锁冲突自动重试一次；父目录句柄按路径缓存，大批量上传不再逐文件重建句柄。
+ * onProgress：可选进度回调（每 20 个文件通知一次，避免大批量时 UI 无反馈）。
  */
-export async function saveFilesToMaterials(files: File[], dirPath: string): Promise<SaveFilesResult> {
+export async function saveFilesToMaterials(
+  files: File[],
+  dirPath: string,
+  onProgress?: (done: number, total: number) => void,
+): Promise<SaveFilesResult> {
   const saved: string[] = [];
   const failed: SaveFilesResult["failed"] = [];
   const dirHandleCache = new Map<string, FileSystemDirectoryHandle>();
@@ -316,7 +375,15 @@ export async function saveFilesToMaterials(files: File[], dirPath: string): Prom
     } catch (error) {
       failed.push({ file: fullPath, reason: describeWriteError(error) });
     }
+    if (onProgress && (saved.length + failed.length) % 20 === 0) {
+      onProgress(saved.length + failed.length, files.length);
+    }
+    // 每 100 个文件让出一次主线程，避免大批量时 IO 队列/微任务堆积拖死页面
+    if ((saved.length + failed.length) % 100 === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
   }
+  onProgress?.(files.length, files.length);
   return { saved, failed };
 }
 
@@ -778,7 +845,7 @@ export async function extractMaterialsDir(
 ): Promise<MaterialExtractResult[]> {
   const maxFiles = options.maxFiles ?? 30;
   const charBudget = options.charBudget ?? MATERIAL_CONTEXT_CHAR_LIMIT;
-  const tree = await listMaterialsDir(path);
+  const tree = await listMaterialsDir(path, 8); // 递归子目录，否则嵌套文件会被漏掉
   const flat = flattenNodes(tree, (n) => n.kind === "file").slice(0, maxFiles);
   const results: MaterialExtractResult[] = [];
   let used = 0;

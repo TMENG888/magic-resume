@@ -105,6 +105,8 @@ export interface ExportToPdfOptions {
   onEnd?: () => void;
   successMessage?: string;
   errorMessage?: string;
+  /** "download"（默认）触发浏览器下载；"blob" 不下载、返回 { blob, fileName } 供程序化使用（如 PI 智能体存入「我的资料」） */
+  mode?: "download" | "blob";
 }
 
 const A4_WIDTH_MM = 210;
@@ -444,8 +446,9 @@ export const exportToLongPagePdf = async ({
   onStart,
   onEnd,
   successMessage,
-  errorMessage
-}: ExportToPdfOptions) => {
+  errorMessage,
+  mode = "download"
+}: ExportToPdfOptions): Promise<{ blob: Blob; fileName: string } | void> => {
   const exportStartTime = performance.now();
   onStart?.();
 
@@ -480,6 +483,9 @@ export const exportToLongPagePdf = async ({
     const imageData = canvas.toDataURL("image/png");
     pdf.addImage(imageData, "PNG", 0, 0, A4_WIDTH_MM, imageHeightMm);
     keepOnlyFirstPage(pdf);
+    if (mode === "blob") {
+      return { blob: pdf.output("blob"), fileName };
+    }
     pdf.save(fileName);
 
     if (successMessage) toast.success(successMessage);

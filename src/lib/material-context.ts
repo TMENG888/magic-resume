@@ -16,7 +16,9 @@ import {
   extractMaterialContent,
   extractMaterialsDir,
   extractMaterialsFile,
+  flattenNodes,
   formatBytes,
+  listMaterialsDir,
   MATERIAL_CONTEXT_CHAR_LIMIT,
   type MaterialExtractResult,
 } from "@/utils/materials";
@@ -134,12 +136,51 @@ const renderExtracted = (result: MaterialExtractResult, index: number) => {
   return lines.join("\n");
 };
 
-/** 将一组附件构建为可注入系统提示词的上下文文本块 */
+/** 轻引用模式：只渲染路径清单（不读取文件内容），AI 需要时用 read_material 工具按需获取。
+ *  适合大文件夹场景 —— 发送上万文件时不再全量提取，避免内存/上下文爆炸。 */
+async function buildReferenceBlock(attachments: MaterialAttachment[]): Promise<string> {
+  const lines: string[] = [];
+  let index = 1;
+  for (const attachment of attachments) {
+    if (attachment.kind === "dir") {
+      try {
+        const tree = await listMaterialsDir(attachment.path, 8);
+        const files = flattenNodes(tree, (node) => node.kind === "file");
+        lines.push(`[${index}] 文件夹：${attachment.path}/（下含 ${files.length} 个文件）`);
+        const preview = files.slice(0, 20).map((node) => `  - ${node.path}`).join("\n");
+        if (preview) {
+          lines.push(preview);
+          if (files.length > 20) lines.push(`  …等共 ${files.length} 个文件`);
+        }
+      } catch {
+        lines.push(`[${index}] 文件夹：${attachment.path}/（目录信息读取失败）`);
+      }
+    } else {
+      lines.push(`[${index}] 文件：${attachment.path}`);
+    }
+    index += 1;
+  }
+  return [
+    "=== 用户附加资料（路径引用） ===",
+    "用户通过「我的资料」附加了以下文件/文件夹的路径引用。注意：这里只有路径清单，不含内容：",
+    ...lines,
+    "如需查看某个文件或文件夹的实际内容，请调用 read_material 工具（传入相对路径；文件夹路径会递归读取内部所有可提取文件的文本）。",
+    "不要在未读取内容的情况下凭文件名猜测或编造内容。",
+    "=== 附加资料结束 ===",
+  ].join("\n");
+}
+
+/** 将一组附件构建为可注入系统提示词的上下文文本块。
+ *  mode = "inline"（默认）：全量提取内容注入 —— 适合一次性生成场景（AI 定制简历，服务端无工具循环）。
+ *  mode = "reference"：只注入路径清单，AI 用 read_material 工具按需读取 —— 适合智能体对话（大文件夹不括爆内存/上下文）。 */
 export async function buildMaterialContextBlock(
   attachments: MaterialAttachment[],
-  options: { totalCharLimit?: number } = {},
+  options: { totalCharLimit?: number; mode?: "inline" | "reference" } = {},
 ): Promise<string> {
   if (!attachments.length) return "";
+  if (options.mode === "reference") {
+    return buildReferenceBlock(attachments);
+  }
   const totalCharLimit = options.totalCharLimit ?? MATERIAL_CONTEXT_CHAR_LIMIT;
   const sections: string[] = [];
   let used = 0;

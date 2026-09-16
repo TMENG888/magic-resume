@@ -15,7 +15,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { ChevronRight, File, Folder, FolderOpen, HardDrive, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useMaterialsStore } from "@/store/useMaterialsStore";
-import { formatBytes } from "@/utils/materials";
+import { formatBytes, saveFilesToMaterials, screenUploadFiles } from "@/utils/materials";
 import {
   createMaterialsAttachment,
   localFileAttachment,
@@ -49,6 +49,7 @@ export function MaterialPickerDialog({
 
   const [selected, setSelected] = useState<MaterialAttachment[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [saving, setSaving] = useState(0); // >0 表示本地文件正在落盘（已保存个数）
   const localInputRef = useRef<HTMLInputElement>(null);
   const localFolderInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -111,8 +112,15 @@ export function MaterialPickerDialog({
   const isMaterialsSelected = (path: string) =>
     selected.some((item) => item.source === "materials" && item.path === path);
 
-  const renderTree = (nodes: ReturnType<typeof useMaterialsStore.getState>["tree"], depth = 0): React.ReactNode =>
-    nodes.map((node) => {
+  // 大目录渲染保护：OPFS 里可能有上万文件，DOM 全量渲染会卡死浏览器（渲染上限 600 项）
+  let renderBudget = 600;
+  const renderTree = (nodes: ReturnType<typeof useMaterialsStore.getState>["tree"], depth = 0): React.ReactNode => {
+    if (renderBudget <= 0) return null;
+    const shown = nodes.slice(0, renderBudget);
+    renderBudget -= shown.length;
+    return (
+      <>
+        {shown.map((node) => {
       const isExpanded = expanded.has(node.path);
       const isSelected = isMaterialsSelected(node.path);
       const dirHasChildren = node.kind === "dir" && (node.children?.length ?? 0) > 0;
@@ -171,61 +179,86 @@ export function MaterialPickerDialog({
             <div>{renderTree(node.children, depth + 1)}</div>
           )}
         </div>
+        );
+        })}
+        {shown.length < nodes.length && (
+          <div className="px-3 py-1.5 text-[10px] text-muted-foreground/70">
+            …{tm("listTruncated", { count: nodes.length - shown.length })}
+          </div>
+        )}
+      </>
+    );
+  };
+
+  /** 本地文件/文件夹统一落盘：写入「我的资料」库后仅保留路径引用（不持有 File 对象），
+   *  发送时只注入路径清单，AI 按需用 read_material 读取内容 —— 避免大文件夹全量提取括爆内存 */
+  const saveLocally = async (files: File[], onDone: (savedPaths: string[]) => void) => {
+    const screen = screenUploadFiles(files);
+    if (screen.blocked) {
+      toast.error(screen.blocked);
+      return;
+    }
+    if (screen.skippedLarge.length) {
+      toast.warning(tm("uploadSkippedLarge", { count: screen.skippedLarge.length }));
+    }
+    if (!screen.accepted.length) return;
+    setSaving(1);
+    try {
+      const result = await saveFilesToMaterials(screen.accepted, "本地上传", (done, total) =>
+        setSaving(done + 1),
       );
-    });
+      void refresh();
+      if (result.saved.length) {
+        toast.success(tm("savedToLibrary", { count: result.saved.length }));
+      }
+      if (result.failed.length) {
+        toast.warning(tm("saveFailedCount", { count: result.failed.length }));
+      }
+      onDone(result.saved);
+    } catch {
+      toast.error(tm("saveFailed"));
+      onDone([]);
+    } finally {
+      setSaving(0);
+    }
+  };
 
   const handleLocalFiles = (files: FileList | null) => {
     if (!files?.length) return;
-    const additions: MaterialAttachment[] = [];
-    for (const file of Array.from(files)) {
-      const relative = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
-      additions.push(
-        createMaterialsAttachment({
-          source: "local",
-          path: relative,
-          name: relative,
-          kind: "file",
-          size: file.size,
-          file,
-        }),
+    const list = Array.from(files);
+    void saveLocally(list, (savedPaths) => {
+      if (!savedPaths.length) return;
+      const additions = savedPaths.map((path) =>
+        createMaterialsAttachment({ source: "materials", path, name: path.split("/").pop() ?? path, kind: "file", size: 0 }),
       );
-    }
-    setSelected((prev) => {
-      const existing = new Set(prev.map((item) => `${item.source}:${item.path}`));
-      return [...prev, ...additions.filter((item) => !existing.has(`local:${item.path}`))];
+      setSelected((prev) => {
+        const existing = new Set(prev.map((item) => `${item.source}:${item.path}`));
+        return [...prev, ...additions.filter((item) => !existing.has(`${item.source}:${item.path}`))];
+      });
     });
     if (localInputRef.current) localInputRef.current.value = "";
     if (localFolderInputRef.current) localFolderInputRef.current.value = "";
   };
 
-  /** 本地文件夹：按顶层目录聚合为一个文件夹附件（保留目录结构，AI 按路径应用） */
+  /** 本地文件夹：落盘后按顶层目录聚合为一个文件夹路径引用（保留目录结构，AI 按需读取） */
   const handleLocalFolder = (files: FileList | null) => {
     if (!files?.length) return;
-    const groups = new Map<string, File[]>();
-    for (const file of Array.from(files)) {
-      const relative = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
-      const root = relative.split("/")[0] || file.name;
-      const list = groups.get(root) ?? [];
-      list.push(file);
-      groups.set(root, list);
-    }
-    const additions: MaterialAttachment[] = [];
-    const groupEntries = Array.from(groups.entries());
-    for (const [root, list] of groupEntries) {
-      additions.push(
-        createMaterialsAttachment({
-          source: "local",
-          path: root,
-          name: root,
-          kind: "dir",
-          size: list.reduce((sum: number, file: File) => sum + file.size, 0),
-          files: list,
-        }),
+    const list = Array.from(files);
+    const roots = new Set(
+      list.map((file) => {
+        const relative = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+        return relative.split("/")[0] || file.name;
+      }),
+    );
+    void saveLocally(list, (savedPaths) => {
+      if (!savedPaths.length) return;
+      const additions = Array.from(roots).map((root) =>
+        createMaterialsAttachment({ source: "materials", path: `本地上传/${root}`, name: root, kind: "dir", size: 0 }),
       );
-    }
-    setSelected((prev) => {
-      const existing = new Set(prev.map((item) => `${item.source}:${item.path}`));
-      return [...prev, ...additions.filter((item) => !existing.has(`local:${item.path}`))];
+      setSelected((prev) => {
+        const existing = new Set(prev.map((item) => `${item.source}:${item.path}`));
+        return [...prev, ...additions.filter((item) => !existing.has(`${item.source}:${item.path}`))];
+      });
     });
     if (localFolderInputRef.current) localFolderInputRef.current.value = "";
   };
@@ -240,7 +273,7 @@ export function MaterialPickerDialog({
   };
 
   const localTotal = useMemo(
-    () => selected.filter((item) => item.source === "local").length,
+    () => selected.filter((item) => item.path.startsWith("本地上传/")).length,
     [selected],
   );
 
@@ -318,7 +351,7 @@ export function MaterialPickerDialog({
               >
                 <HardDrive className="h-6 w-6 text-muted-foreground/70" />
                 <span className="text-[13px] font-medium text-foreground">{tm("uploadFile")}</span>
-                <span className="text-[10px] text-muted-foreground">{t("pickLocal")}</span>
+                <span className="text-[10px] text-muted-foreground">{tm("uploadFolderHint")}</span>
               </button>
               <button
                 type="button"
@@ -330,11 +363,17 @@ export function MaterialPickerDialog({
                 <span className="text-[10px] text-muted-foreground">{tm("keepFolderStructure")}</span>
               </button>
             </div>
-            {localTotal > 0 && (
+            {saving > 0 && (
+              <div className="mt-3 flex items-center gap-2 rounded-xl border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-primary">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                {tm("savingToLibrary", { done: Math.max(0, saving - 1) })}
+              </div>
+            )}
+            {localTotal > 0 && saving === 0 && (
               <ScrollArea className="mt-2 h-[120px] shrink-0 rounded-xl border border-border/60 bg-muted/20 p-2">
                 <div className="space-y-1">
                   {selected
-                    .filter((item) => item.source === "local")
+                    .filter((item) => item.path.startsWith("本地上传/"))
                     .map((item) => (
                       <div key={item.id} className="flex items-center justify-between gap-2 rounded-lg px-2 py-1 text-xs hover:bg-muted/40">
                         <span className="flex min-w-0 items-center gap-1.5">
@@ -343,10 +382,10 @@ export function MaterialPickerDialog({
                           ) : (
                             <File className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                           )}
-                          <span className="truncate">{item.name}</span>
+                          <span className="truncate">{item.path}</span>
                         </span>
-                        <span className="shrink-0 text-[10px] text-muted-foreground">
-                          {formatBytes(item.size ?? 0)}
+                        <span className="shrink-0 text-[10px] text-emerald-600 dark:text-emerald-400">
+                          {tm("savedAsRef")}
                         </span>
                       </div>
                     ))}
@@ -364,7 +403,7 @@ export function MaterialPickerDialog({
             <Button variant="outline" size="sm" className="h-8 rounded-lg" onClick={() => onOpenChange(false)}>
               {tm("cancel")}
             </Button>
-            <Button size="sm" className="h-8 rounded-lg" onClick={handleConfirm} disabled={!selected.length}>
+            <Button size="sm" className="h-8 rounded-lg" onClick={handleConfirm} disabled={!selected.length || saving > 0}>
               {tm("confirm")}
             </Button>
           </div>
